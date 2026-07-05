@@ -1,21 +1,30 @@
 # Coordinates and distribution
 
-Skill-manager units are usually distributed as git repositories. The
-registry is metadata/search, not the source of bytes for the normal
-flow.
-
 ## Source of truth
 
-Recommended publishing model:
+Units are distributed as git repositories. The registry is
+metadata/search, not the source of bytes for the normal flow.
+
+Default publishing model — favor this unless the user asks for
+something different:
 
 1. Put exactly one installable unit at the git repo root.
-2. Commit the unit files.
-3. Push to GitHub or another git host.
-4. Install with `skill-manager install github:owner/repo`,
-   `skill-manager install git+https://...`, `skill-manager install
-   git+ssh://...`, or a local path during development.
-5. Optionally publish metadata to a registry for search/discovery when
+2. Add a `LICENSE` file so the unit can be shared and reused.
+3. Commit the unit files.
+4. Create a GitHub repository (or another git host) and push.
+5. Install the durable copy from the pushed git source:
+   `skill-manager install github:owner/repo`,
+   `skill-manager install git+https://...`, or
+   `skill-manager install git+ssh://...`.
+6. Optionally publish metadata to a registry for search/discovery when
    that unit kind is supported.
+
+Do not leave a `file://` install as the published result. A
+`file:///abs/path` install is for local dry-run and validation only
+(see "Minimal validation" in `references/scaffolding.md`); the copy a
+user actually keeps should resolve to a pushed git source so `sync`,
+provenance, and sharing all work. Only fall back to a file-only or
+local install when the user explicitly asks for one.
 
 The root of the repo must contain the marker for the unit kind:
 
