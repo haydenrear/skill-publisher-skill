@@ -170,3 +170,33 @@ def test_cli_status_runs_as_script(tmp_path):
     assert proc.returncode == 0
     data = json.loads(proc.stdout)
     assert data["plugins"] == ["skt"]
+
+
+def test_cli_tools_reported_from_cli_lock(tmp_path):
+    repo = make_repo(tmp_path / "repo")
+    home = make_home(repo, units={"alpha": {}})
+    (home / "cli-lock.toml").write_text(
+        '["brew"."gh"]\nspec = "brew:gh"\n\n["skill-script"."tla-spec-dev"]\nspec = "skill-script:tla-spec-dev"\n'
+    )
+    report = status.collect(repo)
+    assert report["cli_tools"] == ["gh", "tla-spec-dev"]
+    assert "tla-spec-dev" in status.render_text(report)
+
+
+def test_spec_ticket_plan_match_flag(tmp_path):
+    import subprocess as sp
+
+    repo = make_repo(tmp_path / "repo")
+    make_home(repo, units={"alpha": {}})
+    plan_dir = repo / "specs" / "desired_program_model"
+    plan_dir.mkdir(parents=True)
+    (plan_dir / "ticket_plan.yaml").write_text(
+        "name: wf\ntickets:\n  - id: T-1\n    status: closed\n  - id: T-2\n    status: open\n"
+    )
+    sp.run(["git", "-C", str(repo), "checkout", "-q", "-b", "feature/T-1"], check=True)
+    report = status.collect(repo)
+    assert report["spec_workflow"]["ticket_in_plan"] is True
+    assert "IS in the plan" in status.render_text(report)
+    sp.run(["git", "-C", str(repo), "checkout", "-q", "-b", "feature/GHOST"], check=True)
+    report = status.collect(repo)
+    assert report["spec_workflow"]["ticket_in_plan"] is False

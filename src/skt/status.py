@@ -40,7 +40,9 @@ def collect(start: str | Path = ".") -> dict:
         "spec_workflow": {
             "name": tctx.spec_workflow,
             "open_tickets": tctx.spec_open_tickets,
+            "ticket_in_plan": tctx.spec_ticket_in_plan,
         },
+        "cli_tools": homes.read_cli_tools(home),
         "units": [
             {
                 "name": u.name,
@@ -81,7 +83,16 @@ def render_text(report: dict) -> str:
             if spec["open_tickets"]
             else "; no open tickets"
         )
+        match = spec.get("ticket_in_plan")
+        if match is True:
+            open_part += " — this branch's ticket IS in the plan"
+        elif match is False:
+            open_part += " — this branch's ticket is NOT in the plan"
         lines.append(f"spec       workflow '{spec['name']}' active{open_part}")
+    tools = report.get("cli_tools") or []
+    if tools:
+        shown = ", ".join(tools[:10]) + (f" +{len(tools)-10} more" if len(tools) > 10 else "")
+        lines.append(f"cli        {shown}")
     units = report["units"]
     cm = sum(1 for u in units if u["change_managed"])
     bad = sum(1 for u in units if u["errors"])
