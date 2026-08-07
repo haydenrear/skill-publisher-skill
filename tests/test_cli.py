@@ -6,7 +6,7 @@ import pytest
 
 CLI = Path(__file__).resolve().parents[1] / "src" / "skt" / "cli.py"
 
-PENDING_COMMANDS = ["status", "check", "ticket", "publish", "sync"]
+PENDING_COMMANDS = ["check", "ticket", "publish", "sync"]  # status landed with SKT-3
 
 
 def run(*args: str) -> subprocess.CompletedProcess:

@@ -14,7 +14,6 @@ __version__ = "0.1.0"
 
 # Subcommand -> (implementing ticket, issue URL) for honest stubs.
 _PENDING = {
-    "status": ("SKT-3", "haydenrear/skill-manager-integration-repository#69"),
     "check": ("SKT-4", "haydenrear/skill-manager-integration-repository#70"),
     "sync": ("SKT-4", "haydenrear/skill-manager-integration-repository#70"),
     "ticket": ("SKT-5", "haydenrear/skill-manager-integration-repository#71"),
@@ -79,12 +78,32 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _import_sibling(name: str):
+    """Import a package sibling whether run as a package or a bare script.
+
+    The skill-script installer execs this file directly with the system
+    python3, so relative imports need a bootstrapped sys.path.
+    """
+    if __package__:
+        import importlib
+
+        return importlib.import_module(f".{name}", package=__package__)
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import importlib
+
+    return importlib.import_module(f"skt.{name}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()
         return 0
+    if args.command == "status":
+        return _import_sibling("status").run(as_json=args.json)
     return _stub(args.command)
 
 
