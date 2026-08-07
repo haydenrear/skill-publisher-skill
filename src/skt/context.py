@@ -61,6 +61,49 @@ def _inside(path: Path, ancestor: Path) -> bool:
 
 
 @dataclass(frozen=True)
+class WorktreeSync:
+    """Is this linked worktree's base the parent checkout's current commit?"""
+
+    parent_head: str
+    merge_base: str
+    in_sync: bool
+    ahead: int
+    behind: int
+
+
+def worktree_sync(root: Path) -> WorktreeSync | None:
+    """None unless `root` is a linked worktree with a resolvable parent.
+
+    in_sync means merge-base(worktree HEAD, parent HEAD) == parent HEAD —
+    i.e. the parent repo has not moved past this worktree's base. `ahead`
+    is the worktree's own commits; `behind` is how far the parent has
+    moved past the base (the number that predicts promotion conflicts).
+    """
+    if not is_linked_worktree(root):
+        return None
+    listing = _git("worktree", "list", "--porcelain", cwd=root)
+    if not listing:
+        return None
+    parent = Path(listing.splitlines()[0].split(" ", 1)[1])
+    parent_head = _git("rev-parse", "HEAD", cwd=parent)
+    head = _git("rev-parse", "HEAD", cwd=root)
+    if not parent_head or not head:
+        return None
+    merge_base = _git("merge-base", head, parent_head, cwd=root)
+    if not merge_base:
+        return None
+    ahead = _git("rev-list", "--count", f"{merge_base}..{head}", cwd=root)
+    behind = _git("rev-list", "--count", f"{merge_base}..{parent_head}", cwd=root)
+    return WorktreeSync(
+        parent_head=parent_head,
+        merge_base=merge_base,
+        in_sync=(merge_base == parent_head),
+        ahead=int(ahead or 0),
+        behind=int(behind or 0),
+    )
+
+
+@dataclass(frozen=True)
 class TicketContext:
     branch: str
     ticket: str | None

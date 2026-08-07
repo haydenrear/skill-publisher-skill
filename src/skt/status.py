@@ -43,6 +43,17 @@ def collect(start: str | Path = ".") -> dict:
             "ticket_in_plan": tctx.spec_ticket_in_plan,
         },
         "cli_tools": homes.read_cli_tools(home),
+        "worktree_sync": (
+            {
+                "parent_head": sync.parent_head[:8],
+                "merge_base": sync.merge_base[:8],
+                "in_sync": sync.in_sync,
+                "ahead": sync.ahead,
+                "behind": sync.behind,
+            }
+            if (sync := ctx_mod.worktree_sync(ctx_mod.checkout_root(start))) is not None
+            else None
+        ),
         "units": [
             {
                 "name": u.name,
@@ -89,6 +100,18 @@ def render_text(report: dict) -> str:
         elif match is False:
             open_part += " — this branch's ticket is NOT in the plan"
         lines.append(f"spec       workflow '{spec['name']}' active{open_part}")
+    sync = report.get("worktree_sync")
+    if sync is not None:
+        if sync["in_sync"]:
+            lines.append(
+                f"base       in sync with parent @{sync['parent_head']}"
+                f" ({sync['ahead']} commit(s) ahead)"
+            )
+        else:
+            lines.append(
+                f"base       BASE STALE: parent @{sync['parent_head']}, worktree base "
+                f"@{sync['merge_base']} (behind {sync['behind']}) — reconcile before promoting"
+            )
     tools = report.get("cli_tools") or []
     if tools:
         shown = ", ".join(tools[:10]) + (f" +{len(tools)-10} more" if len(tools) > 10 else "")

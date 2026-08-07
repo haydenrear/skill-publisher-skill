@@ -64,7 +64,19 @@ def run(verb: str | None, ticket_id: str | None, base: str | None = None) -> int
             )
             return 0
         if verb == "info":
-            _print_contract(giw.wt_info(ticket_id))
+            info = giw.wt_info(ticket_id)
+            _print_contract(info)
+            from . import context as ctx_mod
+
+            sync = ctx_mod.worktree_sync(Path(info.worktree))
+            if sync is not None:
+                if sync.in_sync:
+                    print(f"base       in sync with parent @{sync.parent_head[:8]} ({sync.ahead} ahead)")
+                else:
+                    print(
+                        f"base       BASE STALE: parent @{sync.parent_head[:8]}, base "
+                        f"@{sync.merge_base[:8]} (behind {sync.behind}) — reconcile before promoting"
+                    )
             return 0
         if verb == "close":
             from . import publish as publish_mod
