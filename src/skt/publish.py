@@ -35,30 +35,62 @@ def edited_units(home: Path | None) -> list[dict]:
     return out
 
 
-def _parent_home(home: Path, start: str | Path) -> Path | None:
-    """One tier up: worktree -> project home; project -> root; root -> None."""
+def _parent_home(home: Path, start: str | Path) -> tuple[Path | None, str | None]:
+    """One tier up, resolved the way close-change.sh resolves --into.
+
+    Returns (parent, error). (None, None) means the ROOT tier — nothing
+    above by design. (None, "<why>") means the tier REQUIRES a parent and
+    none could be named; callers must fail loudly, never skip the sync.
+    """
     root = ctx_mod.checkout_root(start)
     tier = ctx_mod.classify_tier(home, root)
     if tier == "worktree":
+        # The clone source: the main working tree's own home — the same
+        # derivation bootstrap-home.sh and close-change.sh use, so the
+        # tiers agree by construction.
         main_tree = ctx_mod._git("worktree", "list", "--porcelain", cwd=root)
         if main_tree:
             first = main_tree.splitlines()[0].split(" ", 1)[1]
             candidate = Path(first) / ".skill-manager"
             if candidate.is_dir():
-                return candidate
-        return None
+                return candidate, None
+            return None, (
+                f"this worktree's project home is missing at {candidate} — "
+                "the main working tree has no home"
+            )
+        return None, "git worktree list named no main working tree"
     if tier == "project":
         root_h = homes.root_home()
-        return root_h if root_h.is_dir() else None
-    return None  # root tier: nothing above; publish goes straight to the unit repo
+        if root_h.is_dir():
+            return root_h, None
+        return None, f"operator root home not found at {root_h}"
+    return None, None  # root tier: nothing above; publish goes straight to the unit repo
 
 
 def _cli(home: Path) -> Path:
     return home / "bin" / "cli" / "skill-manager"
 
 
+def _cli_env() -> dict:
+    """Env for invoking a home pin, livelock-guarded.
+
+    Older pins are the unguarded `cli="${SKILL_MANAGER_CLI:-<abs>}"` form:
+    if the session exports SKILL_MANAGER_CLI naming a pin, the pin execs
+    itself forever (measured in close-change.sh's history). The pin embeds
+    its own absolute CLI path as the fallback, so stripping the variable
+    is always correct here — mirroring close-change.sh run_cli().
+    """
+    import os
+
+    env = dict(os.environ)
+    env.pop("SKILL_MANAGER_CLI", None)
+    return env
+
+
 def _run_cli(home: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run([str(_cli(home)), *args], capture_output=True, text=True)
+    return subprocess.run(
+        [str(_cli(home)), *args], capture_output=True, text=True, env=_cli_env()
+    )
 
 
 def run(unit_name: str | None, *, check_only: bool = False, ticket: str | None = None,
@@ -89,7 +121,14 @@ def run(unit_name: str | None, *, check_only: bool = False, ticket: str | None =
         print(f"error: home CLI not found at {_cli(home)}")
         return 1
 
-    parent = _parent_home(home, start)
+    parent, parent_error = _parent_home(home, start)
+    if parent is None and parent_error is not None:
+        print(f"error: cannot resolve the parent home — {parent_error}")
+        print(
+            "fix:   run the sync yourself with an explicit destination, then re-run: "
+            f"{_cli(home)} home sync --from {home} --to <parent-home> --merge"
+        )
+        return 1
     if parent is not None:
         proc = _run_cli(home, "home", "sync", "--from", str(home), "--to", str(parent), "--merge")
         if proc.returncode != 0:

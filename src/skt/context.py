@@ -67,6 +67,7 @@ class TicketContext:
     epic: str | None
     kind: str
     tier: str
+    on_epic_branch: bool = False
     spec_workflow: str | None = None
     spec_open_tickets: list[str] = field(default_factory=list)
 
@@ -106,19 +107,31 @@ def gather(start: str | Path, home: Path) -> TicketContext:
     if match:
         ticket = match.group(1)
     epic = None
+    on_epic_branch = False
     match = _EPIC_RE.match(branch)
     if match:
         epic = match.group(1)
-    upstream_epic = _git(
-        "for-each-ref", "--format=%(refname:short)", "refs/heads/epic/*", cwd=root
-    )
-    if not epic and upstream_epic:
-        epic = upstream_epic.splitlines()[0].split("/", 1)[1] + " (branch present)"
+        on_epic_branch = True
+    if not epic:
+        # Keep the field CLEAN (consumed as JSON by the SKT-6 hook): the
+        # slug only, with a separate boolean for "a branch exists but we
+        # are not on it". Check remote refs too — a fresh clone has no
+        # local epic/* until someone checks it out.
+        refs = _git(
+            "for-each-ref", "--format=%(refname:short)",
+            "refs/heads/epic/*", "refs/remotes/*/epic/*", cwd=root,
+        )
+        for ref in refs.splitlines():
+            short = ref.split("epic/", 1)
+            if len(short) == 2:
+                epic = short[1]
+                break
     name, open_tickets = spec_workflow(root)
     return TicketContext(
         branch=branch,
         ticket=ticket,
         epic=epic,
+        on_epic_branch=on_epic_branch,
         kind=checkout_kind(root),
         tier=classify_tier(home, root),
         spec_workflow=name,

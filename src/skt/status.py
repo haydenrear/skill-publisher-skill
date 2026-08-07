@@ -35,6 +35,7 @@ def collect(start: str | Path = ".") -> dict:
             "branch": tctx.branch,
             "ticket": tctx.ticket,
             "epic": tctx.epic,
+            "on_epic_branch": tctx.on_epic_branch,
         },
         "spec_workflow": {
             "name": tctx.spec_workflow,
@@ -66,7 +67,8 @@ def render_text(report: dict) -> str:
     if checkout["ticket"]:
         place += f" (ticket {checkout['ticket']})"
     if checkout["epic"]:
-        place += f" (epic {checkout['epic']})"
+        suffix = "" if checkout.get("on_epic_branch") else " available"
+        place += f" (epic {checkout['epic']}{suffix})"
     lines.append(place)
     home_line = f"home       {report['home']} — tier: {report['tier']}, policy: {report['policy']}"
     if report["drift_pending"]:
