@@ -1,5 +1,5 @@
 ---
-name: skill-publisher
+name: unit-authoring
 description: 'Author and maintain installable skill-manager units: skills, plugins, doc-repos, and harnesses. Read this before editing any file inside a unit — SKILL.md, its frontmatter or description, skill-manager.toml, plugin.json, harness.toml, or a references/ page — not only when creating one from scratch. Use when making a directory installable by skill-manager, choosing a unit kind, scaffolding a unit, writing or reviewing unit manifests/TOML, adding CLI or MCP dependencies, wiring references, validating install/bind/instantiate round-trips, preparing optional registry metadata, or shipping an edit to an already-installed unit so it reaches $SKILL_MANAGER_HOME (commit, push, then `skill-manager sync`). Detailed schemas live in references for skills, plugins, doc-repos, harnesses, scaffolding, coordinates/distribution, dependencies, bindings/sync, and skill-script.'
 skill-imports:
   - unit: skill-manager
@@ -8,12 +8,17 @@ skill-imports:
     section: semantics
 ---
 
-# skill-publisher
+# unit-authoring
 
 Use this skill when the user wants to turn a directory of agent docs,
 tooling, or project profiles into something **skill-manager can
 install**, and whenever the user edits a unit that is already
 installable.
+
+(Formerly the standalone `skill-publisher` skill; now a contained skill
+of the `skt` plugin. Session orientation, version notifications, and
+worktree change management live in the sibling `skt` skill — this one is
+authoring only.)
 
 The main job:
 
@@ -26,7 +31,7 @@ The main job:
    install the durable copy from that git source — not from a local
    `file://` path. Favor this unless the user asks otherwise. Registry
    publish is optional metadata for supported shapes, not the primary
-   distribution path. See `references/coords-and-distribution.md`.
+   distribution path. See `../../references/coords-and-distribution.md`.
 6. Ship later edits into the store: commit, push, then
    `skill-manager sync <unit>`. An edit that is not pushed and synced is
    invisible to agents. See "Shipping edits to an installed unit" below.
@@ -44,7 +49,7 @@ the optional publish step.
   harness.
 - **The user wants to edit an existing one.** Any change to `SKILL.md`,
   a frontmatter `description`, `skill-manager.toml`,
-  `.claude-plugin/plugin.json`, `harness.toml`, or a `references/` page
+  `.claude-plugin/plugin.json`, `harness.toml`, or a `../../references/` page
   is unit authoring, and it is not done until the edit is pushed and
   synced.
 - The user wants to scaffold a new unit.
@@ -60,10 +65,10 @@ the optional publish step.
 
 | Kind | Use when | Root marker | Details |
 |---|---|---|---|
-| Skill | One focused agent capability. | `SKILL.md` + `skill-manager.toml` with `[skill]` | `references/skills.md` |
-| Plugin | Bundle skills with hooks, commands, agents, or shared deps. | `.claude-plugin/plugin.json` | `references/plugins.md` |
-| Doc-repo | Version markdown sources bound into project `CLAUDE.md` / `AGENTS.md`. | `skill-manager.toml` with `[doc-repo]` | `references/doc-repos.md` |
-| Harness | Everything an agent needs for a project role: reviewer, coder, release agent, etc. | `harness.toml` with `[harness]` | `references/harnesses.md` |
+| Skill | One focused agent capability. | `SKILL.md` + `skill-manager.toml` with `[skill]` | `../../references/skills.md` |
+| Plugin | Bundle skills with hooks, commands, agents, or shared deps. | `.claude-plugin/plugin.json` | `../../references/plugins.md` |
+| Doc-repo | Version markdown sources bound into project `CLAUDE.md` / `AGENTS.md`. | `skill-manager.toml` with `[doc-repo]` | `../../references/doc-repos.md` |
+| Harness | Everything an agent needs for a project role: reviewer, coder, release agent, etc. | `harness.toml` with `[harness]` | `../../references/harnesses.md` |
 
 When in doubt, write a skill. Use a plugin for plugin runtime surface or
 versioned bundles. Use a doc-repo for markdown that should bind into a
@@ -74,44 +79,44 @@ composes skills, plugins, docs, and MCP tool selections.
 
 Load only the reference needed for the current task:
 
-- `references/scaffolding.md` — `skill-manager create`, current scaffold
+- `../../references/scaffolding.md` — `skill-manager create`, current scaffold
   support, example starters, and initial validation.
-- `references/skills.md` — bare skill layout, `SKILL.md` frontmatter,
+- `../../references/skills.md` — bare skill layout, `SKILL.md` frontmatter,
   `[skill]` TOML, and skill validation.
-- `references/plugins.md` — plugin layout, `.claude-plugin/plugin.json`,
+- `../../references/plugins.md` — plugin layout, `.claude-plugin/plugin.json`,
   `skill-manager-plugin.toml`, contained skills, hooks/commands/agents,
   and plugin validation.
-- `references/doc-repos.md` — `[doc-repo]`, `[[sources]]`, source ids,
+- `../../references/doc-repos.md` — `[doc-repo]`, `[[sources]]`, source ids,
   `agents`, bind coords, doc binding, and doc sync behavior.
-- `references/skill-imports.md` — semantic markdown imports,
+- `../../references/skill-imports.md` — semantic markdown imports,
   frontmatter syntax, and when to add manifest references for imported
   skills.
-- `references/harnesses.md` — `harness.toml` as a full
+- `../../references/harnesses.md` — `harness.toml` as a full
   project-specific agent profile, transitive refs, `harness
   instantiate`, `--project-dir` doc/`CLAUDE.md`/`AGENTS.md` binding,
   instance locks, sync, and rm.
-- `references/coords-and-distribution.md` — coord grammar,
+- `../../references/coords-and-distribution.md` — coord grammar,
   `github:`/`git+`/`file:` sources, one unit per git repo root,
   references, git sync behavior, the edit → push → sync store loop, and
   registry metadata.
-- `references/dependencies.md` — CLI and MCP dependency TOML examples
+- `../../references/dependencies.md` — CLI and MCP dependency TOML examples
   and resolution behavior for pip/npm/brew/tar/skill-script and
   npm/uv/docker/binary/shell MCP load types.
-- `references/bindings-and-sync.md` — install vs bind, projection
+- `../../references/bindings-and-sync.md` — install vs bind, projection
   ledgers, conflict policies, unbind/rebind, doc sync, and harness sync.
-- `references/skill-scripts.md` — private CLI install scripts, env vars,
+- `../../references/skill-scripts.md` — private CLI install scripts, env vars,
   fingerprinting, rerun semantics, and security model.
-- `references/runpod-mcp-onboarding.md` — worked MCP onboarding case
+- `../../references/runpod-mcp-onboarding.md` — worked MCP onboarding case
   study with npm load type and host-env passthrough.
 
 ## Examples
 
-Example starters live under `examples/`:
+Example starters live under `../../examples/`:
 
-- `examples/skill/`
-- `examples/plugin/`
-- `examples/doc-repo/`
-- `examples/harness/`
+- `../../examples/skill/`
+- `../../examples/plugin/`
+- `../../examples/doc-repo/`
+- `../../examples/harness/`
 
 Copy one when the CLI does not scaffold that shape yet or when you need
 a minimal known-good layout:
@@ -126,12 +131,12 @@ cp -r <skill-publisher-skill>/examples/harness <my-harness>
 ## Operating Workflow
 
 1. Choose the unit kind from the table above.
-2. Load the matching reference and `references/scaffolding.md`.
+2. Load the matching reference and `../../references/scaffolding.md`.
 3. Ensure the unit is at the root of its own git repo. Do not put
    multiple top-level units in one repo today.
-4. Use `references/coords-and-distribution.md` when adding references or
+4. Use `../../references/coords-and-distribution.md` when adding references or
    deciding between `github:`, `git+`, `file:`, and registry/name coords.
-5. Use `references/dependencies.md` when adding CLI or MCP deps.
+5. Use `../../references/dependencies.md` when adding CLI or MCP deps.
 6. Validate locally from outside the source directory. A `file://`
    install here is for dry-run/validation only, not the durable copy:
 
@@ -146,7 +151,7 @@ skill-manager list
    push, and install from `github:owner/repo`. Favor this over leaving a
    `file://` install unless the user asks for a local-only install. The
    default publishing model lives in
-   `references/coords-and-distribution.md`.
+   `../../references/coords-and-distribution.md`.
 
 Extra validation:
 
@@ -213,7 +218,7 @@ Notes that trip agents up:
   `sync <unit>` may consult the registry for a published `git_sha`.
   `--git-latest` skips it and fetches the install-time `gitRef`
   directly, which is what you want for an unpublished edit. See the
-  registry caution in `references/coords-and-distribution.md`.
+  registry caution in `../../references/coords-and-distribution.md`.
 - **Never edit the store copy in place.** The next sync overwrites it,
   and its provenance no longer matches `origin`.
 - **Sync re-projects the agent symlinks.** A successful sync reports
@@ -227,8 +232,8 @@ To iterate without pushing on every keystroke, use a working-tree sync
 (`skill-manager sync <unit> --from <dir> --merge --yes`) or the
 `skill-dev` worktree flow, then finish with a real commit + push + sync
 so the store's provenance points at the remote again. Full semantics are
-in `references/bindings-and-sync.md` and the "Git versioning and sync"
-section of `references/coords-and-distribution.md`.
+in `../../references/bindings-and-sync.md` and the "Git versioning and sync"
+section of `../../references/coords-and-distribution.md`.
 
 ## Modeled CLI Workflow Coverage
 
