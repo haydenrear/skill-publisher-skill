@@ -13,10 +13,8 @@ import sys
 __version__ = "0.1.0"
 
 # Subcommand -> (implementing ticket, issue URL) for honest stubs.
-_PENDING = {
-    "ticket": ("SKT-5", "haydenrear/skill-manager-integration-repository#71"),
-    "publish": ("SKT-5", "haydenrear/skill-manager-integration-repository#71"),
-}
+# Empty since SKT-5; kept for future subcommands landing across tickets.
+_PENDING: dict[str, tuple[str, str]] = {}
 
 NOT_IMPLEMENTED_EXIT = 2
 
@@ -64,15 +62,18 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("unit", nargs="?")
 
     ticket = sub.add_parser(
-        "ticket", help="worktree lifecycle: new/close/info via git-issue-workflow (SKT-5)"
+        "ticket", help="worktree lifecycle: new/close/info via git-issue-workflow"
     )
     ticket.add_argument("verb", nargs="?", choices=["new", "close", "info"])
     ticket.add_argument("ticket_id", nargs="?")
+    ticket.add_argument("--base", help="base branch for ticket new")
 
     publish = sub.add_parser(
-        "publish", help="guided home-sync + unit-publish for edited skills (SKT-5)"
+        "publish", help="guided home-sync + unit-publish for edited skills"
     )
     publish.add_argument("unit", nargs="?")
+    publish.add_argument("--check", action="store_true", help="list edited units only; exit 10 if any")
+    publish.add_argument("--ticket", help="ticket id for the publish branch (default: inferred from branch)")
 
     return parser
 
@@ -107,6 +108,10 @@ def main(argv: list[str] | None = None) -> int:
         return _import_sibling("check").run(as_json=args.json, cached=args.cached, ttl=args.ttl)
     if args.command == "sync":
         return _import_sibling("sync").run(args.unit)
+    if args.command == "ticket":
+        return _import_sibling("ticket").run(args.verb, args.ticket_id, base=args.base)
+    if args.command == "publish":
+        return _import_sibling("publish").run(args.unit, check_only=args.check, ticket=args.ticket)
     return _stub(args.command)
 
 
