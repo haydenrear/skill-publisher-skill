@@ -28,6 +28,7 @@ SCHEMA_VERSION = 1
 DEFAULT_TTL_SECONDS = 900
 NOTIFY_EXIT = 10
 REMOTE_TIMEOUT_SECONDS = 10
+NETWORK_BUDGET_SECONDS = 15  # total, under the SessionStart hook's 30s / PostToolUse 20s
 
 
 def _remote_tip(origin: str, ref: str | None) -> str | None:
@@ -103,11 +104,19 @@ def collect(start: str | Path = ".", *, use_network: bool = True) -> dict:
         # agent session for minutes on the first post-TTL hook call.
         from concurrent.futures import ThreadPoolExecutor
 
+        import time as _time
+
+        deadline = _time.monotonic() + NETWORK_BUDGET_SECONDS
         with ThreadPoolExecutor(max_workers=8) as pool:
             futures = {
                 u.name: pool.submit(_remote_tip_safe, u.origin, u.git_ref) for u in managed
             }
-            tips = {name: f.result() for name, f in futures.items()}
+            for name, future in futures.items():
+                remaining = deadline - _time.monotonic()
+                try:
+                    tips[name] = future.result(timeout=max(0.1, remaining))
+                except Exception:  # budget exhausted -> unverifiable, not late
+                    tips[name] = None
     for unit in managed:
         checked.append(unit.name)
         if use_network:

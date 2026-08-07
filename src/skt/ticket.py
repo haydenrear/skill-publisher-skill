@@ -69,7 +69,18 @@ def run(verb: str | None, ticket_id: str | None, base: str | None = None) -> int
         if verb == "close":
             from . import publish as publish_mod
 
-            leftovers = publish_mod.edited_units(homes.find_home("."))
+            # The advisory must inspect the TARGET worktree's home, not
+            # cwd's — `skt ticket close <T>` runs from anywhere, and the
+            # edited skills at risk live in the home being torn down.
+            target_home = None
+            try:
+                info = giw.wt_info(ticket_id)
+                candidate = Path(info.worktree) / ".skill-manager"
+                if candidate.is_dir():
+                    target_home = candidate
+            except giw.WtError:
+                pass
+            leftovers = publish_mod.edited_units(target_home or homes.find_home("."))
             if leftovers:
                 names = ", ".join(u["unit"] for u in leftovers)
                 print(f"note: edited unit(s) in this home before close: {names}")
