@@ -99,6 +99,24 @@ def read_policy(home: Path) -> str:
     return str(data.get("policy", "live"))
 
 
+def read_cli_tools(home: Path) -> list[str]:
+    """Tool names from cli-lock.toml — keyed [package-manager.tool]."""
+    lock = home / "cli-lock.toml"
+    if not lock.is_file():
+        return []
+    try:
+        data = tomllib.loads(lock.read_text())
+    except (tomllib.TOMLDecodeError, OSError):
+        return []
+    tools: set[str] = set()
+    for backend_table in data.values():
+        if isinstance(backend_table, dict):
+            for tool, spec in backend_table.items():
+                if isinstance(spec, dict):
+                    tools.add(tool)
+    return sorted(tools)
+
+
 def drift_pending(home: Path) -> bool:
     """A recorded, UNACKNOWLEDGED drift blocks the next launch (exit 8).
 

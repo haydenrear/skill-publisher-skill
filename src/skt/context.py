@@ -70,18 +70,21 @@ class TicketContext:
     on_epic_branch: bool = False
     spec_workflow: str | None = None
     spec_open_tickets: list[str] = field(default_factory=list)
+    spec_ticket_in_plan: bool | None = None  # None: no plan or no ticket branch
 
 
 _TICKET_RE = re.compile(r"^feature/(.+)$")
 _EPIC_RE = re.compile(r"^epic/(.+)$")
 
 
-def spec_workflow(root: Path) -> tuple[str | None, list[str]]:
+def spec_workflow(root: Path) -> tuple[str | None, list[str], list[str]]:
+    """(workflow name, open ticket ids, ALL ticket ids) from ticket_plan.yaml."""
     plan = root / "specs" / "desired_program_model" / "ticket_plan.yaml"
     if not plan.is_file():
-        return None, []
+        return None, [], []
     name = None
     open_tickets: list[str] = []
+    all_tickets: list[str] = []
     current_id = None
     try:
         for line in plan.read_text().splitlines():
@@ -90,13 +93,14 @@ def spec_workflow(root: Path) -> tuple[str | None, list[str]]:
             m = re.match(r"^\s*-\s*id:\s*(\S+)", line)
             if m:
                 current_id = m.group(1).strip("'\"")
+                all_tickets.append(current_id)
             m = re.match(r"^\s*status:\s*(\S+)", line)
             if m and current_id and m.group(1).strip("'\"").lower() in ("open", "in_progress"):
                 open_tickets.append(current_id)
                 current_id = None
     except OSError:
-        return None, []
-    return name or "(unnamed)", open_tickets
+        return None, [], []
+    return name or "(unnamed)", open_tickets, all_tickets
 
 
 def gather(start: str | Path, home: Path) -> TicketContext:
@@ -126,7 +130,10 @@ def gather(start: str | Path, home: Path) -> TicketContext:
             if len(short) == 2:
                 epic = short[1]
                 break
-    name, open_tickets = spec_workflow(root)
+    name, open_tickets, all_tickets = spec_workflow(root)
+    ticket_in_plan = None
+    if name is not None and ticket is not None:
+        ticket_in_plan = ticket in all_tickets
     return TicketContext(
         branch=branch,
         ticket=ticket,
@@ -136,4 +143,5 @@ def gather(start: str | Path, home: Path) -> TicketContext:
         tier=classify_tier(home, root),
         spec_workflow=name,
         spec_open_tickets=open_tickets,
+        spec_ticket_in_plan=ticket_in_plan,
     )
