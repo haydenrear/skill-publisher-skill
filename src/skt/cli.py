@@ -14,8 +14,6 @@ __version__ = "0.1.0"
 
 # Subcommand -> (implementing ticket, issue URL) for honest stubs.
 _PENDING = {
-    "check": ("SKT-4", "haydenrear/skill-manager-integration-repository#70"),
-    "sync": ("SKT-4", "haydenrear/skill-manager-integration-repository#70"),
     "ticket": ("SKT-5", "haydenrear/skill-manager-integration-repository#71"),
     "publish": ("SKT-5", "haydenrear/skill-manager-integration-repository#71"),
 }
@@ -57,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="new-version and sync-with-root notifications (SKT-4)",
     )
     check.add_argument("--cached", action="store_true", help="throttled, no-network path")
+    check.add_argument("--ttl", type=int, default=900, help="cache freshness window in seconds")
     check.add_argument("--json", action="store_true")
 
     sync = sub.add_parser(
@@ -104,6 +103,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "status":
         return _import_sibling("status").run(as_json=args.json)
+    if args.command == "check":
+        return _import_sibling("check").run(as_json=args.json, cached=args.cached, ttl=args.ttl)
+    if args.command == "sync":
+        return _import_sibling("sync").run(args.unit)
     return _stub(args.command)
 
 
