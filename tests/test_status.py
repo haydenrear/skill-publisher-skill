@@ -200,3 +200,63 @@ def test_spec_ticket_plan_match_flag(tmp_path):
     sp.run(["git", "-C", str(repo), "checkout", "-q", "-b", "feature/GHOST"], check=True)
     report = status.collect(repo)
     assert report["spec_workflow"]["ticket_in_plan"] is False
+
+
+def _commit(repo, msg="c"):
+    import subprocess as sp
+
+    (repo / "f.txt").write_text(msg)
+    sp.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    sp.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "-m", msg],
+        check=True,
+    )
+
+
+def test_worktree_base_in_sync_fresh(tmp_path):
+    import subprocess as sp
+
+    repo = make_repo(tmp_path / "repo")
+    sp.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "feature/T-1",
+            str(tmp_path / "repo-T-1")], check=True)
+    wt = tmp_path / "repo-T-1"
+    make_home(wt, units={})
+    report = status.collect(wt)
+    sync = report["worktree_sync"]
+    assert sync["in_sync"] is True and sync["ahead"] == 0 and sync["behind"] == 0
+    assert "in sync with parent" in status.render_text(report)
+
+
+def test_worktree_ahead_still_in_sync(tmp_path):
+    import subprocess as sp
+
+    repo = make_repo(tmp_path / "repo")
+    sp.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "feature/T-2",
+            str(tmp_path / "repo-T-2")], check=True)
+    wt = tmp_path / "repo-T-2"
+    make_home(wt, units={})
+    _commit(wt, "work")
+    sync = status.collect(wt)["worktree_sync"]
+    assert sync["in_sync"] is True and sync["ahead"] == 1
+
+
+def test_worktree_base_stale_when_parent_moves(tmp_path):
+    import subprocess as sp
+
+    repo = make_repo(tmp_path / "repo")
+    sp.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "feature/T-3",
+            str(tmp_path / "repo-T-3")], check=True)
+    wt = tmp_path / "repo-T-3"
+    make_home(wt, units={})
+    _commit(repo, "parent moved")
+    report = status.collect(wt)
+    sync = report["worktree_sync"]
+    assert sync["in_sync"] is False and sync["behind"] == 1
+    assert "BASE STALE" in status.render_text(report)
+
+
+def test_main_checkout_has_no_sync_block(tmp_path):
+    repo = make_repo(tmp_path / "repo")
+    make_home(repo, units={})
+    assert status.collect(repo)["worktree_sync"] is None
