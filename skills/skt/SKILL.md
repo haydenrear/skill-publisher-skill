@@ -21,14 +21,19 @@ skt publish [<unit>]  # a home-edited skill -> up one tier -> its own git repo
 `skt` is on `PATH` in every skill-manager home (`<home>/bin/cli/skt`).
 `skt --help` is authoritative for syntax.
 
-## Scaffold status
+## Startup disclosure
 
-This unit is mid-epic
-([#65](https://github.com/haydenrear/skill-manager-integration-repository/issues/65)).
-Subcommands answer honestly today: implemented ones run; pending ones
-exit 2 and name the ticket that lands them (`status` → SKT-3, `check`/
-`sync` → SKT-4, `ticket`/`publish` → SKT-5). Until `skt ticket` lands,
-the worktree front door is git-issue-workflow's `wt`:
+In Claude Code this plugin's `SessionStart` hook injects `skt status`
+into every session automatically, and a `PostToolUse` hook surfaces
+"new version available" notifications when the throttled check fires
+(every hook injection appends a line to `<home>/logs/skt/hook.log`).
+Harnesses without a hook runtime (codex, gemini) get the projected skt
+skill plus an instruction snippet instead — the honest per-harness
+matrix is `../../references/harness-capabilities.md`.
+
+`skt ticket new/close` wraps git-issue-workflow's `wt`; the raw path
+form still works everywhere and is the fallback when skt is not
+installed:
 
 ```bash
 "${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-issue-workflow/scripts/wt" new <TICKET>

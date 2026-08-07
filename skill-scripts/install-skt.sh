@@ -6,13 +6,29 @@ set -euo pipefail
 : "${SKILL_DIR:?SKILL_DIR is required}"
 : "${SKILL_NAME:=skt}"
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "skt install requires python3" >&2
-  exit 127
-fi
+# skt is stdlib-only but needs python >= 3.11 (tomllib). macOS's
+# /usr/bin/python3 is 3.9, so a bare `python3` in the wrapper breaks the
+# moment PATH is minimal. Probe at INSTALL time and bake the absolute
+# interpreter into the wrapper; SKT_PYTHON overrides for tests/pins.
+pick_python() {
+  if [[ -n "${SKT_PYTHON:-}" ]]; then
+    printf '%s' "$SKT_PYTHON"; return 0
+  fi
+  for candidate in python3.14 python3.13 python3.12 python3.11 python3 python; do
+    local resolved
+    resolved="$(command -v "$candidate" 2>/dev/null)" || continue
+    if "$resolved" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+      printf '%s' "$resolved"; return 0
+    fi
+  done
+  return 1
+}
 
-# SKILL_DIR is the installed unit's store root. The entrypoint is
-# stdlib-only, so it runs on the system python3 with no venv.
+PY="$(pick_python)" || {
+  echo "skt install requires python >= 3.11 (tomllib); none found on PATH" >&2
+  exit 127
+}
+
 ENTRYPOINT="$SKILL_DIR/src/skt/cli.py"
 if [[ ! -f "$ENTRYPOINT" ]]; then
   echo "skt entrypoint not found at $ENTRYPOINT" >&2
@@ -26,9 +42,13 @@ cat > "$WRAPPER" <<SH
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec python3 "$ENTRYPOINT" "\$@"
+exec "$PY" "$ENTRYPOINT" "\$@"
 SH
 chmod 0755 "$WRAPPER"
 
 "$WRAPPER" --help >/dev/null
-echo "installed skt for $SKILL_NAME at $WRAPPER"
+"$WRAPPER" status --json >/dev/null 2>&1 || {
+  echo "skt wrapper failed its status probe (interpreter: $PY)" >&2
+  exit 1
+}
+echo "installed skt for $SKILL_NAME at $WRAPPER (python: $PY)"
