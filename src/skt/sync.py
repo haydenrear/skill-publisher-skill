@@ -41,15 +41,20 @@ def run(unit_name: str | None, *, start: str | Path = ".") -> int:
     if not cli.is_file():
         print(f"skt sync: home CLI not found at {cli}")
         return 1
+    from .publish import _cli_env  # livelock guard: strip SKILL_MANAGER_CLI
+
     proc = subprocess.run(
-        [str(cli), "sync", unit_name, "--git-latest"], capture_output=True, text=True
+        [str(cli), "sync", unit_name, "--git-latest"],
+        capture_output=True,
+        text=True,
+        env=_cli_env(),
     )
     if proc.returncode != 0:
         print(f"skt sync: underlying sync failed (exit {proc.returncode})")
         print(proc.stdout[-2000:] + proc.stderr[-2000:])
         return proc.returncode
     after = {u.name: u for u in homes.read_units(home)}.get(unit_name)
-    tip = check_mod._remote_tip(unit.origin, unit.git_ref)
+    tip = check_mod._remote_tip_safe(unit.origin, unit.git_ref)
     if after and tip and after.git_hash == tip:
         print(f"skt sync: {unit_name} now at {tip[:8]} (matches remote tip)")
         return 0

@@ -100,5 +100,20 @@ def read_policy(home: Path) -> str:
 
 
 def drift_pending(home: Path) -> bool:
-    """A recorded, unacknowledged drift blocks the next launch (exit 8)."""
-    return any((home / name).is_file() for name in ("home.drift.json", "drift.json"))
+    """A recorded, UNACKNOWLEDGED drift blocks the next launch (exit 8).
+
+    DriftGate.acknowledge rewrites the record with acknowledged=true —
+    it never deletes the file — so presence alone is not pending.
+    """
+    for name in ("home.drift.json", "drift.json"):
+        record = home / name
+        if not record.is_file():
+            continue
+        try:
+            data = json.loads(record.read_text())
+        except (json.JSONDecodeError, OSError):
+            return True  # unreadable record: assume the gate will refuse
+        if isinstance(data, dict) and data.get("acknowledged") is True:
+            continue
+        return True
+    return False

@@ -27,6 +27,7 @@ from . import homes
 SCHEMA_VERSION = 1
 DEFAULT_TTL_SECONDS = 900
 NOTIFY_EXIT = 10
+REMOTE_TIMEOUT_SECONDS = 10
 
 
 def _remote_tip(origin: str, ref: str | None) -> str | None:
@@ -34,11 +35,23 @@ def _remote_tip(origin: str, ref: str | None) -> str | None:
         ["git", "ls-remote", origin, ref or "HEAD"],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=REMOTE_TIMEOUT_SECONDS,
     )
     if proc.returncode != 0 or not proc.stdout.strip():
         return None
     return proc.stdout.split()[0]
+
+
+def _remote_tip_safe(origin: str, ref: str | None) -> str | None:
+    """Never raises: a hung or failing remote is 'unverifiable', not a crash.
+
+    This is on the hook path (SKT-6 runs check on tool events) — an
+    exception here would surface as a traceback inside an agent session.
+    """
+    try:
+        return _remote_tip(origin, ref)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
 
 
 def _store_dir(home: Path, unit: homes.Unit) -> Path | None:
@@ -81,13 +94,30 @@ def collect(start: str | Path = ".", *, use_network: bool = True) -> dict:
     tier = ctx_mod.classify_tier(home, ctx_mod.checkout_root(start))
     notifications: list[dict] = []
     checked: list[str] = []
-    for unit in homes.read_units(home):
-        if not unit.change_managed:
-            continue
+    unverifiable: list[str] = []
+    managed = [u for u in homes.read_units(home) if u.change_managed]
+    tips: dict[str, str | None] = {}
+    if use_network and managed:
+        # Parallel: a real root home has ~20 git-backed units, and serial
+        # ls-remote at up to REMOTE_TIMEOUT_SECONDS each would block an
+        # agent session for minutes on the first post-TTL hook call.
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {
+                u.name: pool.submit(_remote_tip_safe, u.origin, u.git_ref) for u in managed
+            }
+            tips = {name: f.result() for name, f in futures.items()}
+    for unit in managed:
         checked.append(unit.name)
         if use_network:
-            tip = _remote_tip(unit.origin, unit.git_ref)
-            if tip and tip != unit.git_hash:
+            tip = tips.get(unit.name)
+            if tip is None:
+                unverifiable.append(unit.name)
+            elif tip != unit.git_hash:
+                # Compared against the origin's default-branch tip: installed
+                # records carry no ref pin, so a deliberately pinned unit can
+                # appear here — the message states what was compared.
                 notifications.append(
                     {
                         "kind": "new-version",
@@ -118,6 +148,7 @@ def collect(start: str | Path = ".", *, use_network: bool = True) -> dict:
         "home": str(home),
         "tier": tier,
         "checked_units": checked,
+        "unverifiable": unverifiable,
         "network": use_network,
         "checked_at": time.time(),
         "notifications": notifications,
@@ -157,25 +188,36 @@ def render_text(report: dict) -> str:
     if report.get("home") is None:
         return f"skt check: {report['error']}"
     notes = report["notifications"]
+    unverifiable = report.get("unverifiable") or []
     if not notes:
         scope = f"{len(report['checked_units'])} change-managed unit(s)"
-        return f"skt check: all current ({scope}, tier {report['tier']})"
+        line = f"skt check: all current ({scope}, tier {report['tier']})"
+        if unverifiable:
+            line += f"; unverifiable: {', '.join(unverifiable)}"
+        return line
     lines = [f"skt check: {len(notes)} notification(s), tier {report['tier']}"]
     lines += [f"  {n['message']}" for n in notes]
+    if unverifiable:
+        lines.append(f"  unverifiable (remote unreachable): {', '.join(unverifiable)}")
     if report.get("hint"):
         lines.append(f"  hint: {report['hint']}")
     return "\n".join(lines)
 
 
 def run(*, as_json: bool, cached: bool, ttl: int = DEFAULT_TTL_SECONDS, start: str | Path = ".") -> int:
-    report = None
-    if cached:
-        home = homes.find_home(start)
-        if home is not None:
-            report = _read_cache(home, ttl)
-    if report is None:
-        report = collect(start)
-        _write_cache(report)
+    """Hook-safe: this function must never raise (SKT-6 wires it into sessions)."""
+    try:
+        report = None
+        if cached:
+            home = homes.find_home(start)
+            if home is not None:
+                report = _read_cache(home, ttl)
+        if report is None:
+            report = collect(start)
+            _write_cache(report)
+    except Exception as exc:  # noqa: BLE001 — a hook traceback inside an agent session is worse
+        print(f"skt check: internal error ({type(exc).__name__}: {exc})")
+        return 1
     print(json.dumps(report, indent=2) if as_json else render_text(report))
     if not report.get("home"):
         return 1
