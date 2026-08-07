@@ -39,9 +39,23 @@ resolve_skt() {
 
 SKT_CMD="$(resolve_skt)" || exit 0
 
-NOTES="$($SKT_CMD check --cached 2>/dev/null)"
+NOTES="$($SKT_CMD check --cached --json 2>/dev/null)"
 rc=$?
 [ "$rc" -eq 10 ] || exit 0
+
+# Dedup: `check --cached` keeps returning 10 from the cache for the whole
+# TTL window, but the contract is one notification per check RESULT, not
+# one per tool call. Key on (session, checked_at): a marker file records
+# the last result this session already surfaced.
+if [ -n "${SKILL_MANAGER_HOME:-}" ]; then
+  CHECKED_AT="$(printf '%s' "$NOTES" | sed -n 's/.*"checked_at": *\([0-9.]*\).*/\1/p' | head -1)"
+  MARKER="$SKILL_MANAGER_HOME/logs/skt/.notified-${CLAUDE_SESSION_ID:-unknown}"
+  if [ -f "$MARKER" ] && [ "$(cat "$MARKER" 2>/dev/null)" = "$CHECKED_AT" ]; then
+    exit 0
+  fi
+  mkdir -p "$SKILL_MANAGER_HOME/logs/skt" 2>/dev/null && printf '%s' "$CHECKED_AT" > "$MARKER" 2>/dev/null || true
+fi
+NOTES="$($SKT_CMD check --cached 2>/dev/null)"
 
 if [ -n "${SKILL_MANAGER_HOME:-}" ]; then
   logdir="$SKILL_MANAGER_HOME/logs/skt"
