@@ -67,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
     ticket.add_argument("verb", nargs="?", choices=["new", "close", "info"])
     ticket.add_argument("ticket_id", nargs="?")
     ticket.add_argument("--base", help="base branch for ticket new")
+    ticket.add_argument(
+        "--path",
+        help="epic mode: create the worktree at this DECLARED path (assignments "
+        "name it) with the index-base pinning conventions, instead of wt's "
+        "derived path",
+    )
 
     publish = sub.add_parser(
         "publish", help="guided home-sync + unit-publish for edited skills"
@@ -109,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "sync":
         return _import_sibling("sync").run(args.unit)
     if args.command == "ticket":
-        return _import_sibling("ticket").run(args.verb, args.ticket_id, base=args.base)
+        return _import_sibling("ticket").run(args.verb, args.ticket_id, base=args.base, path=args.path)
     if args.command == "publish":
         return _import_sibling("publish").run(args.unit, check_only=args.check, ticket=args.ticket)
     return _stub(args.command)
