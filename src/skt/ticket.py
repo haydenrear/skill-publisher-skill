@@ -48,10 +48,98 @@ def _print_contract(contract) -> None:
         print(f"propagate  {contract.propagate}")
 
 
-def run(verb: str | None, ticket_id: str | None, base: str | None = None) -> int:
+def _bootstrap_script() -> Path | None:
+    giw = homes.find_home(".")
+    if giw is None:
+        return None
+    candidate = giw / "skills" / "git-issue-workflow" / "scripts" / "bootstrap-home.sh"
+    return candidate if candidate.is_file() else None
+
+
+def epic_new(ticket_id: str, base: str | None, path: str) -> int:
+    """Create a DECLARED-path worktree the way an epic assignment requires.
+
+    Epic assignments name the exact worktree path and base, which the
+    conventional `wt new` cannot produce (it derives its own path) — the
+    docs hand-roll `git worktree add` + `bootstrap-home.sh` for this one
+    case. This subsumes that pair, with the index-base pinning
+    conventions (clean tree; OIDs resolved once; create-only retention
+    ref; branch from the pinned commit, never the moving ref) and the
+    same roll-back-on-bootstrap-failure contract as new-change.sh.
+    """
+    import subprocess
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", *args], capture_output=True, text=True)
+
+    dirty = git("status", "--porcelain")
+    if dirty.stdout.strip():
+        print("error: working tree is not clean — an epic worktree pins its base from a clean slate")
+        print("fix:   commit or stash, then re-run")
+        return 1
+    base_ref = base or "HEAD"
+    commit = git("rev-parse", base_ref)
+    tree = git("rev-parse", f"{base_ref}^{{tree}}")
+    if commit.returncode != 0 or tree.returncode != 0:
+        print(f"error: cannot resolve base {base_ref!r}")
+        print("fix:   git fetch origin, then pass --base <existing-ref>")
+        return 1
+    commit_oid, tree_oid = commit.stdout.strip(), tree.stdout.strip()
+    toplevel = git("rev-parse", "--show-toplevel").stdout.strip()
+    repo_id = Path(toplevel).name if toplevel else "repo"
+    ref_name = f"refs/index-bases/{repo_id}/{tree_oid}"
+    existing = git("rev-parse", "--verify", "--quiet", ref_name)
+    if existing.returncode == 0 and existing.stdout.strip() != commit_oid:
+        print(f"error: retention ref {ref_name} already points at {existing.stdout.strip()[:8]}, not {commit_oid[:8]}")
+        print("fix:   the declared base disagrees with an earlier pin — reconcile with the epic owner")
+        return 1
+    if existing.returncode != 0:
+        made = git("update-ref", ref_name, commit_oid, "")
+        if made.returncode != 0:
+            print(f"error: could not create retention ref {ref_name}: {made.stderr.strip()}")
+            return 1
+    branch = f"feature/{ticket_id}"
+    added = git("worktree", "add", path, "-b", branch, commit_oid)
+    if added.returncode != 0:
+        print(f"error: git worktree add failed: {added.stderr.strip().splitlines()[-1] if added.stderr.strip() else added.returncode}")
+        print(f"fix:   git worktree add {path} -b {branch} {commit_oid[:12]}   # then bootstrap-home.sh --root {path}")
+        return 1
+    bootstrap = _bootstrap_script()
+    if bootstrap is None:
+        git("worktree", "remove", "--force", path)
+        git("branch", "-D", branch)
+        print("error: bootstrap-home.sh not found in this home; worktree rolled back")
+        print("fix:   skill-manager sync git-issue-workflow, then re-run")
+        return 3
+    proc = subprocess.run([str(bootstrap), "--root", path], capture_output=True, text=True)
+    if proc.returncode != 0:
+        git("worktree", "remove", "--force", path)
+        git("branch", "-D", branch)
+        tail = (proc.stdout + proc.stderr).strip().splitlines()
+        print(f"error: home bootstrap failed (exit {proc.returncode}); worktree and branch rolled back")
+        if tail:
+            print("       " + tail[-1])
+        print(f"fix:   {bootstrap} --root <repo-root>   # once per repository, then re-run")
+        return 3
+    print(f"created epic worktree {path}")
+    print(f"branch     {branch} (pinned base {commit_oid[:12]}; retention ref {ref_name})")
+    launch = Path(path) / ".skill-manager" / "bin" / "launch" / "claude"
+    if launch.is_file():
+        print(f"launch     {launch}")
+    print(f"close      skt ticket close {ticket_id}   # resolves declared paths by search")
+    print(
+        "\nA skill edit inside that worktree's home is in no git diff; "
+        "run `skt publish` there before closing, or the close gate will refuse."
+    )
+    return 0
+
+
+def run(verb: str | None, ticket_id: str | None, base: str | None = None, path: str | None = None) -> int:
     if not verb or not ticket_id:
         print("usage: skt ticket new|close|info <TICKET> [--base <branch>]", file=sys.stderr)
         return 1
+    if verb == "new" and path:
+        return epic_new(ticket_id, base, path)
     giw = _import_wrapper()
     try:
         if verb == "new":
