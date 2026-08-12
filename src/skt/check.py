@@ -125,12 +125,15 @@ def _store_dir(home: Path, unit: homes.Unit) -> Path | None:
 
 
 def _local_state(unit_dir: Path, *, deadline: float | None = None) -> str:
-    """'clean' | 'dirty' | 'ahead' for a store checkout with its own .git.
+    """'clean' | 'dirty' | 'ahead' | 'unknown' for a store checkout.
 
     Both probes are bounded (per-call cap AND the shared deadline). A
-    probe that timed out reports 'clean': a publish prompt must never be
-    fabricated from a check that did not finish — the next explicit
-    check retries.
+    probe that timed out reports 'unknown', never 'clean': a publish
+    prompt must not be fabricated from a check that did not finish, but
+    a record that presents unpushed work as verified-clean for a whole
+    TTL is the same lie in the other direction. The caller labels
+    'unknown' as unverifiable, which also keeps an all-timed-out
+    refresh out of the cache.
     """
     if not (unit_dir / ".git").exists():
         return "clean"
@@ -142,14 +145,14 @@ def _local_state(unit_dir: Path, *, deadline: float | None = None) -> str:
 
     proc = _run_git(["git", "-C", str(unit_dir), "status", "--porcelain"], _timeout())
     if proc is None:
-        return "clean"
+        return "unknown"
     if proc.stdout.strip():
         return "dirty"
     proc = _run_git(
         ["git", "-C", str(unit_dir), "rev-list", "--count", "@{upstream}..HEAD"], _timeout()
     )
     if proc is None:
-        return "clean"
+        return "unknown"
     if proc.returncode == 0 and proc.stdout.strip() and int(proc.stdout.strip()) > 0:
         return "ahead"
     return "clean"
@@ -221,7 +224,13 @@ def collect(start: str | Path = ".", *, use_network: bool = True) -> dict:
             unit_dir = _store_dir(home, unit)
             if unit_dir:
                 state = _local_state(unit_dir, deadline=deadline)
-                if state != "clean":
+                if state == "unknown":
+                    # The probe never finished: an evidence gap, not a
+                    # verdict. Labeling it keeps the cached record honest
+                    # and the refusal predicate counting it.
+                    if unit.name not in unverifiable:
+                        unverifiable.append(unit.name)
+                elif state != "clean":
                     notifications.append(
                         {
                             "kind": "sync-with-root",

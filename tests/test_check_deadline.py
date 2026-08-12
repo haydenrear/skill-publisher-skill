@@ -208,8 +208,12 @@ def test_root_tier_hanging_local_git_is_bounded(tmp_path, monkeypatch):
     report = check_mod.collect(repo)
     elapsed = time.monotonic() - t0
     assert elapsed < 3
-    # A probe that never finished must not fabricate a publish prompt.
+    # A probe that never finished must not fabricate a publish prompt...
     assert all(n["kind"] != "sync-with-root" for n in report["notifications"])
+    # ...and must not present the unit as verified-clean either: the gap
+    # is labeled unverifiable, so the cached record carries the evidence
+    # and the cache-refusal predicate counts it.
+    assert "alpha" in report["unverifiable"]
     assert_children_dead(spool)
 
 
