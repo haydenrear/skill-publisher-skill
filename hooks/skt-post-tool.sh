@@ -52,20 +52,31 @@ rc=$?
 
 # Dedup: `check --cached` keeps returning 10 from the cache for the whole
 # TTL window, but the contract is one notification per check RESULT, not
-# one per tool call. Key on (session, checked_at): a marker file records
-# the last result this session already surfaced.
-if [ -n "${SKILL_MANAGER_HOME:-}" ]; then
-  CHECKED_AT="$(printf '%s' "$NOTES" | sed -n 's/.*"checked_at": *\([0-9.]*\).*/\1/p' | head -1)"
-  MARKER="$SKILL_MANAGER_HOME/logs/skt/.notified-${CLAUDE_SESSION_ID:-unknown}"
-  if [ -f "$MARKER" ] && [ "$(cat "$MARKER" 2>/dev/null)" = "$CHECKED_AT" ]; then
-    exit 0
-  fi
-  mkdir -p "$SKILL_MANAGER_HOME/logs/skt" 2>/dev/null && printf '%s' "$CHECKED_AT" > "$MARKER" 2>/dev/null || true
+# one per tool call. Key on (session, checked_at). UNCONDITIONAL: the
+# home path comes from the report itself, so a session launched without
+# SKILL_MANAGER_HOME in its environment (bare `claude` at the operator
+# root) gets the same once-per-result behavior — the env-gated version
+# of this block re-injected the notification block on EVERY tool call
+# in exactly those sessions. When even the report has no home, a
+# tmpdir marker still enforces the contract.
+HOME_DIR="${SKILL_MANAGER_HOME:-}"
+if [ -z "$HOME_DIR" ]; then
+  HOME_DIR="$(printf '%s' "$NOTES" | sed -n 's/.*"home": *"\([^"]*\)".*/\1/p' | head -1)"
 fi
+CHECKED_AT="$(printf '%s' "$NOTES" | sed -n 's/.*"checked_at": *\([0-9.]*\).*/\1/p' | head -1)"
+if [ -n "$HOME_DIR" ]; then
+  MARKER="$HOME_DIR/logs/skt/.notified-${CLAUDE_SESSION_ID:-unknown}"
+else
+  MARKER="${TMPDIR:-/tmp}/skt-notified-${CLAUDE_SESSION_ID:-unknown}"
+fi
+if [ -f "$MARKER" ] && [ "$(cat "$MARKER" 2>/dev/null)" = "$CHECKED_AT" ]; then
+  exit 0
+fi
+mkdir -p "$(dirname "$MARKER")" 2>/dev/null && printf '%s' "$CHECKED_AT" > "$MARKER" 2>/dev/null || true
 NOTES="$($SKT_CMD check --cached 2>/dev/null)"
 
-if [ -n "${SKILL_MANAGER_HOME:-}" ]; then
-  logdir="$SKILL_MANAGER_HOME/logs/skt"
+if [ -n "$HOME_DIR" ]; then
+  logdir="$HOME_DIR/logs/skt"
   mkdir -p "$logdir" 2>/dev/null && printf '%s post-tool session=%s check-notified\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${CLAUDE_SESSION_ID:-unknown}" \
     >> "$logdir/hook.log" 2>/dev/null || true

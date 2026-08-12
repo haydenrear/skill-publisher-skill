@@ -25,18 +25,38 @@ def isolate_root_home(tmp_path, monkeypatch):
     monkeypatch.setenv("SKT_ROOT_HOME", str(tmp_path / "fake-root" / ".skill-manager"))
 
 
-def run_post_tool(home: Path, cwd: Path) -> subprocess.CompletedProcess:
+def run_post_tool(home: Path, cwd: Path, *, with_home_env: bool = True) -> subprocess.CompletedProcess:
     env = {
         "PATH": "/usr/bin:/bin",
         "SKT_PYTHON": sys.executable,
-        "SKILL_MANAGER_HOME": str(home),
         "CLAUDE_PLUGIN_ROOT": str(Path(__file__).resolve().parents[1]),
         "CLAUDE_SESSION_ID": "dedup-session",
     }
+    if with_home_env:
+        env["SKILL_MANAGER_HOME"] = str(home)
     return subprocess.run(
         ["bash", str(HOOKS / "skt-post-tool.sh")],
         capture_output=True, text=True, cwd=cwd, env=env,
     )
+
+
+def test_post_tool_dedups_without_home_env(tmp_path):
+    """A session launched without SKILL_MANAGER_HOME (bare `claude` at the
+    operator root) must get the same once-per-result contract. The
+    env-gated dedup skipped the marker entirely in that case and
+    re-injected the whole notification block on EVERY tool call — pure
+    context waste, compounding with any chronic notification."""
+    repo = make_repo(tmp_path / "repo")
+    bare, tip = make_unit_upstream(tmp_path, "alpha")
+    home = make_home(repo, units={"alpha": unit_record(bare, tip)})
+    advance_upstream(bare, tmp_path)
+    seed_cache(home, repo)
+    first = run_post_tool(home, repo, with_home_env=False)
+    assert first.returncode == 0
+    assert "new version available" in json.loads(first.stdout)["hookSpecificOutput"]["additionalContext"]
+    second = run_post_tool(home, repo, with_home_env=False)
+    assert second.returncode == 0
+    assert second.stdout.strip() == "", "no-home-env session must not re-inject per tool call"
 
 
 def test_post_tool_notifies_once_per_check_result(tmp_path):
