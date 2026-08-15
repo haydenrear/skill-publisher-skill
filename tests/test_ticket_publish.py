@@ -193,3 +193,102 @@ def test_publish_infers_ticket_from_branch(tmp_path, capsys):
     calls = recording_cli(home)
     assert publish_mod.run("alpha", start=repo) == 0
     assert "--ticket T-42" in calls.read_text()
+
+
+# --- skill-publisher-skill#15, publish side ---------------------------------
+# `edited_units` shares `_local_state`, so the same false `ahead` made
+# `skt publish` (no unit named) refuse with "several units are edited" and
+# made `skt ticket close` warn about units with nothing to publish.
+
+
+def test_publish_check_ignores_a_merely_stale_upstream_ref(tmp_path, monkeypatch, capsys):
+    import subprocess as sp
+
+    from skt import publish as publish_mod
+    from test_check import make_unit_upstream, stale_upstream_store, unit_record
+    from test_status import make_home, make_repo
+
+    fake_root = tmp_path / "fake-root"
+    make_repo(fake_root / "anywhere")
+    bare, tip = make_unit_upstream(tmp_path, "alpha")
+    home = make_home(fake_root, units={"alpha": unit_record(bare, tip)})
+    unit_dir, new_tip = stale_upstream_store(home, bare, "alpha", tmp_path)
+    count = sp.run(["git", "-C", str(unit_dir), "rev-list", "--count", "@{upstream}..HEAD"],
+                   capture_output=True, text=True, check=True).stdout.strip()
+    assert int(count) > 0
+
+    assert publish_mod.edited_units(home) == []
+
+
+def test_publish_check_still_sees_real_unpushed_work(tmp_path):
+    import subprocess as sp
+
+    from skt import publish as publish_mod
+    from test_check import GIT, make_unit_upstream, unit_record
+    from test_status import make_home, make_repo
+
+    fake_root = tmp_path / "fake-root"
+    make_repo(fake_root / "anywhere")
+    bare, tip = make_unit_upstream(tmp_path, "alpha")
+    home = make_home(fake_root, units={"alpha": unit_record(bare, tip)})
+    unit_dir = home / "skills" / "alpha"
+    sp.run(["git", "clone", "-q", str(bare), str(unit_dir)], check=True)
+    (unit_dir / "SKILL.md").write_text("# unpublished\n")
+    sp.run([*GIT, "-C", str(unit_dir), "add", "-A"], check=True)
+    sp.run([*GIT, "-C", str(unit_dir), "commit", "-q", "-m", "local only"], check=True)
+
+    edited = publish_mod.edited_units(home)
+    assert [e["unit"] for e in edited] == ["alpha"]
+    assert edited[0]["state"] == "ahead"
+
+
+def test_edited_units_bounds_its_probes_and_does_not_repeat_them(tmp_path, monkeypatch):
+    """F1: one shared deadline, and each local probe run once.
+
+    Without the deadline this walked every still-ahead unit serially at
+    `_remote_tip`'s 10s fallback — about a minute on the six falsely-ahead
+    units measured in the project home, at the `skt ticket close` teardown
+    gate. And re-running `_local_state` to re-decide with a tip repeated
+    the `status` and `rev-list` whose answers were already in hand.
+    """
+    import subprocess as sp
+
+    from skt import check as check_mod
+    from skt import publish as publish_mod
+    from test_check import make_unit_upstream, stale_upstream_store, unit_record
+    from test_status import make_home, make_repo
+
+    fake_root = tmp_path / "fake-root"
+    make_repo(fake_root / "anywhere")
+    units = {}
+    for name in ("alpha", "beta"):
+        bare, tip = make_unit_upstream(tmp_path, name)
+        units[name] = unit_record(bare, tip)
+    home = make_home(fake_root, units=units)
+    for name in ("alpha", "beta"):
+        stale_upstream_store(home, tmp_path / f"{name}-upstream.git", name, tmp_path)
+
+    deadlines: list = []
+    real_tip = check_mod._remote_tip_safe
+
+    def recording_tip(origin, ref, *, deadline=None):
+        deadlines.append(deadline)
+        return real_tip(origin, ref, deadline=deadline)
+
+    local_calls: list = []
+    real_local = check_mod._local_state
+
+    def recording_local(unit_dir, *, deadline=None, remote_tip=None):
+        local_calls.append(str(unit_dir))
+        return real_local(unit_dir, deadline=deadline, remote_tip=remote_tip)
+
+    monkeypatch.setattr(publish_mod, "_remote_tip_safe", recording_tip)
+    monkeypatch.setattr(publish_mod, "_local_state", recording_local)
+
+    assert publish_mod.edited_units(home) == []
+
+    assert len(deadlines) == 2, "one tip resolved per still-ahead unit"
+    assert all(d is not None for d in deadlines), "every probe is bounded"
+    assert len(set(deadlines)) == 1, "and they SHARE one deadline, not one each"
+    assert len(local_calls) == len(set(local_calls)) == 2, \
+        f"_local_state runs once per unit, not twice: {local_calls}"

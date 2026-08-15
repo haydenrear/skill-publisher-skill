@@ -16,9 +16,38 @@ from . import check as check_mod
 from . import homes
 
 
+FETCH_TIMEOUT_SECONDS = 20
+
+
 def _cli(home: Path) -> Path:
     """The home's own pinned CLI — never a bare `skill-manager` from PATH."""
     return home / "bin" / "cli" / "skill-manager"
+
+
+def _refresh_tracking_refs(store: Path | None) -> bool | None:
+    """Move the store's `refs/remotes/*` up to the remote it just synced from.
+
+    The underlying sync advances the CHECKOUT without necessarily moving
+    the remote-tracking ref, so `@{upstream}..HEAD` is left non-empty
+    even though every one of those commits is already published — and
+    the very next `skt check` reads that ref and calls it unpushed work.
+    Measured: `skt sync debugging` reported "now at 91909afc (matches
+    remote tip)" and the check immediately after it said "debugging
+    modified locally (ahead)" with rev-list = 2; a bare `git fetch` took
+    it to 0. So the command that fixes staleness was manufacturing the
+    false report, and this is where it stops.
+
+    Bounded and advisory: None when there is nothing to fetch, True on
+    success, False when the fetch failed — the sync itself already
+    succeeded and must not be turned into a failure by a slow network.
+    """
+    if store is None or not (store / ".git").exists():
+        return None
+    proc = check_mod._run_git(
+        ["git", "-C", str(store), "fetch", "--quiet", "--no-tags"],
+        float(FETCH_TIMEOUT_SECONDS),
+    )
+    return proc is not None and proc.returncode == 0
 
 
 def run(unit_name: str | None, *, start: str | Path = ".") -> int:
@@ -54,9 +83,17 @@ def run(unit_name: str | None, *, start: str | Path = ".") -> int:
         print(proc.stdout[-2000:] + proc.stderr[-2000:])
         return proc.returncode
     after = {u.name: u for u in homes.read_units(home)}.get(unit_name)
+    store = check_mod._store_dir(home, unit)
+    refreshed = _refresh_tracking_refs(store)
     tip = check_mod._remote_tip_safe(unit.origin, unit.git_ref)
     if after and tip and after.git_hash == tip:
         print(f"skt sync: {unit_name} now at {tip[:8]} (matches remote tip)")
+        if refreshed is False:
+            print(
+                f"skt sync: WARNING — could not refresh the remote-tracking refs in "
+                f"{store}, so `skt check` may report this unit as locally ahead. "
+                f"By hand: git -C {store} fetch"
+            )
         return 0
     if after and tip:
         print(
