@@ -6,6 +6,12 @@ it, and `unit publish` is the only route to the unit's own repository —
 the only copy that survives this machine. This command runs them in that
 order through the home's own pinned CLI, with wt-style refusals: one
 error line, one fix line.
+
+The `home sync` is NARROWED to the unit being published
+(skill-manager#182): carrying every unit meant one unrelated conflicted
+unit failed the command and stopped the publish. A CLI too old to know
+`--unit` falls back to the whole-home sync, loudly — see
+`_lacks_unit_flag` for why that decision cannot be made on the exit code.
 """
 
 from __future__ import annotations
@@ -134,6 +140,70 @@ def _run_cli(home: Path, *args: str) -> subprocess.CompletedProcess:
     )
 
 
+# skill-manager's UnknownUnitException.EXIT_CODE. Unambiguous: only a CLI
+# that HAS `--unit` can produce it.
+UNKNOWN_UNIT_EXIT = 12
+# picocli's usage exit. A CLI without `--unit` returns this for the unknown
+# option — and skill-manager#182 as first merged ALSO returned it for a unit
+# name neither home holds, so this code alone decides nothing.
+USAGE_EXIT = 2
+
+
+def _lacks_unit_flag(proc: subprocess.CompletedProcess) -> bool:
+    """Did this CLI refuse because it does not KNOW `--unit`?
+
+    Measured against the pre-#182 CLI:
+
+        exit=2
+        Unknown options: '--unit', 'alpha'
+        Usage: skill-manager home sync [-hv] [--agent-context] ...
+
+    and against the first merged #182 CLI, for a name neither home holds:
+
+        exit=2
+        ✗ home sync --unit X: no unit named 'X' in either home (...)
+
+    Same exit code, opposite meanings — picocli's usage code and
+    `UnknownUnitException`'s were both 2. So the discrimination cannot be
+    the exit code, and getting it wrong is not cosmetic: treating a typo'd
+    unit name as "old CLI" would silently fall back to the whole-home sync
+    that skill-manager#182 exists to avoid, which is the one outcome worse
+    than failing. Keyed on picocli's own signature, which the narrowed
+    refusal never emits. `"unknown option"` matches the plural form too.
+    """
+    if proc.returncode != USAGE_EXIT:
+        return False
+    blob = (proc.stdout + proc.stderr).lower()
+    return "unknown option" in blob and "--unit" in blob
+
+
+def _sync_one_tier_up(home: Path, parent: Path, unit_name: str) -> tuple[subprocess.CompletedProcess, bool]:
+    """`home sync` the edited unit up a tier. Returns (proc, narrowed).
+
+    Narrowed by default, because a whole-home sync is all-or-nothing: one
+    unrelated conflicted unit failed the command and stopped the publish
+    (skill-manager#182). Every project and worktree home currently carries
+    a pin older than that change, so a hard failure against one would take
+    `skt publish` from "blocked when a neighbour conflicts" to "blocked
+    always" — strictly worse. Hence the fallback, which is announced
+    rather than silent: on an old CLI the caller is back to the
+    all-or-nothing behaviour and should know why.
+    """
+    targeted = _run_cli(
+        home, "home", "sync", "--from", str(home), "--to", str(parent), "--merge",
+        "--unit", unit_name,
+    )
+    if not _lacks_unit_flag(targeted):
+        return targeted, True
+    print(
+        f"note: {_cli(home)} predates `home sync --unit`, so this falls back to a "
+        f"whole-home sync — an unrelated conflicted unit can still block it. "
+        f"Upgrade the CLI this home is pinned to, then re-run."
+    )
+    whole = _run_cli(home, "home", "sync", "--from", str(home), "--to", str(parent), "--merge")
+    return whole, False
+
+
 def run(unit_name: str | None, *, check_only: bool = False, ticket: str | None = None,
         start: str | Path = ".") -> int:
     home = homes.find_home(start)
@@ -167,18 +237,31 @@ def run(unit_name: str | None, *, check_only: bool = False, ticket: str | None =
         print(f"error: cannot resolve the parent home — {parent_error}")
         print(
             "fix:   run the sync yourself with an explicit destination, then re-run: "
-            f"{_cli(home)} home sync --from {home} --to <parent-home> --merge"
+            f"{_cli(home)} home sync --from {home} --to <parent-home> --merge "
+            f"--unit {unit_name}"
         )
         return 1
     if parent is not None:
-        proc = _run_cli(home, "home", "sync", "--from", str(home), "--to", str(parent), "--merge")
+        proc, narrowed = _sync_one_tier_up(home, parent, unit_name)
         if proc.returncode != 0:
             print(f"error: home sync into {parent} failed (exit {proc.returncode})")
-            print("fix:   resolve the reported conflict, then re-run skt publish "
-                  f"{unit_name}")
+            if proc.returncode == UNKNOWN_UNIT_EXIT:
+                # The narrowed sync refused the NAME. Never retry whole-home
+                # here: that would publish under a different reconciliation
+                # than the one asked for.
+                print(f"fix:   no unit named {unit_name!r} in this home or its parent — "
+                      f"check `skt publish --check` for the name")
+            elif narrowed:
+                print(f"fix:   resolve the conflict reported in {unit_name}, then re-run "
+                      f"skt publish {unit_name}")
+            else:
+                print("fix:   this CLI cannot sync one unit, so an unrelated unit can block "
+                      f"it — resolve the reported conflict, or upgrade {_cli(home)}, then "
+                      f"re-run skt publish {unit_name}")
             sys.stdout.write(proc.stdout[-1500:] + proc.stderr[-1500:])
             return proc.returncode
-        print(f"synced: this home -> {parent} (one tier up; teardown-safe)")
+        scope = f"{unit_name} only" if narrowed else "whole home"
+        print(f"synced: this home -> {parent} ({scope}; one tier up; teardown-safe)")
 
     ticket = ticket or _infer_ticket(start)
     publish_args = ["unit", "publish", unit_name]
