@@ -1,0 +1,100 @@
+# CI for skt.
+#
+# This repository had NO workflows. Its suite — 100 tests, ~40 s — was green
+# and had never been executed by anything but a human remembering to run it.
+# Four PRs were merged during one epic on the strength of an agent's local run
+# plus a reviewer's re-run, and a cross-PR merge conflict in src/skt/sync.py
+# could have shipped a runtime break with neither run seeing it.
+#
+# So this workflow is deliberately the cheapest thing that closes that gap, and
+# nothing more:
+#
+#   tests   the declared local signal, `uv run --with pytest pytest tests`,
+#           run on the interpreter floor this project declares AND on the one
+#           developers actually use. `requires-python = ">=3.11"` is a claim
+#           nothing checked; the matrix is what makes it a measurement.
+#   units   every SKILL.md and unit manifest this repo ships still parses.
+#           A skill whose frontmatter is invalid YAML does not fail loudly, it
+#           DISAPPEARS from a sync — see .github/scripts/check_units.py.
+#
+# THE INTERPRETER IS PINNED ON PURPOSE. Bare `python3` on a developer machine
+# in this workspace is 3.14 without pytest while only 3.13 has it, so an
+# unpinned job inherits an ambiguity that has already cost debugging time. uv
+# provisions the exact versions named below.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: pytest (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor this project's pyproject declares, and the version the
+        # fleet's homes actually run.
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Several tests build real fixture repositories with `git init` and
+      # `git commit`. A hosted runner has no committer identity, so those
+      # would fail for a reason that is not about skt.
+      - name: Give git a committer identity
+        run: |
+          git config --global user.email "ci@skt.invalid"
+          git config --global user.name "skt CI"
+          git config --global init.defaultBranch main
+
+      - name: Run the suite
+        run: uv run --python ${{ matrix.python-version }} --with pytest pytest tests -q
+
+  units:
+    name: unit manifests and frontmatter
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # This repo ships a plugin (skt), two contained skills, and four example
+      # units that other repos are told to copy. A malformed example is a
+      # malformed unit in every repo that follows it.
+      - name: Validate unit manifests and SKILL.md frontmatter
+        run: uv run --python 3.13 --script .github/scripts/check_units.py --root .
+
+      - name: Install shellcheck
+        run: command -v shellcheck >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y shellcheck; }
+
+      # `--severity=error` would pass on anything that parses. Warning level is
+      # the real gate; the three exclusions are the known-noise set measured
+      # across this repo's hooks and install script (unused-var and
+      # cd-without-guard), and they are excluded rather than silently tolerated
+      # so that lowering the bar is a diff.
+      - name: Lint the shipped shell scripts
+        run: shellcheck --severity=warning --exclude=SC2034,SC2164,SC2046 hooks/*.sh skill-scripts/*.sh
