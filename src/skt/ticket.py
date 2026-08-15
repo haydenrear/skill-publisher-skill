@@ -9,12 +9,94 @@ remedies on a refused `close`.
 from __future__ import annotations
 
 import sys
+import tomllib
 from pathlib import Path
 
 from . import homes
 
+UNIT = "git-issue-workflow"
+UNIT_SOURCE = "github:haydenrear/git-issue-workflow-skill"
 
-def _import_wrapper():
+
+def _cli_name(home: Path | None) -> str:
+    """The command that writes THIS home: its pin when it has one."""
+    if home is not None:
+        pin = home / "bin" / "cli" / "skill-manager"
+        if pin.is_file():
+            return str(pin)
+    return "skill-manager"
+
+
+def _declared_in_manifest(manifest: Path, unit: str) -> bool:
+    """Does `skill-project.toml` name this unit under any unit-kind table?"""
+    try:
+        data = tomllib.loads(manifest.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    for kind in ("skills", "plugins", "docs", "harnesses"):
+        table = data.get(kind)
+        if isinstance(table, dict) and unit in table:
+            return True
+    return False
+
+
+def _manifest_path(start: str | Path = ".") -> Path | None:
+    from . import context as ctx_mod
+
+    candidate = ctx_mod.checkout_root(start) / "skill-project.toml"
+    return candidate if candidate.is_file() else None
+
+
+def _giw_remedy(home: Path | None, start: str | Path = ".") -> list[str]:
+    """The commands that actually fix this home, for THIS home's state.
+
+    `sync` was named unconditionally, and `sync` cannot install: it pulls
+    an already-installed unit to its latest source. In every home that
+    hit this the unit was neither installed NOR declared, so the remedy
+    named a unit that does not exist there — measured identically in
+    `constituents/skill-manager`'s home and in
+    `constituents/meta-orchestrator`'s, and hit five times over this
+    epic. Not-installed and not-synced are different faults with
+    different fixes, so they are told apart here.
+    """
+    cli = _cli_name(home)
+    if home is None:
+        return [
+            "no skill-manager home was found from here",
+            "fix:   create this checkout's home first — scripts/agent-home.sh, or "
+            "git-issue-workflow's scripts/bootstrap-home.sh --root <repo-root>",
+        ]
+    installed = (home / "skills" / UNIT).is_dir() or (
+        home / "installed" / f"{UNIT}.json"
+    ).is_file()
+    if installed:
+        return [
+            f"{UNIT} is installed in {home} but carries no importable python surface",
+            f"fix:   {cli} sync {UNIT} --git-latest   # needs the SKT-2 version or later",
+        ]
+    manifest = _manifest_path(start)
+    if manifest is not None and _declared_in_manifest(manifest, UNIT):
+        return [
+            f"{UNIT} is declared in {manifest} but is not installed in {home}",
+            f"fix:   SKILL_MANAGER_HOME={home} {cli} project resolve",
+        ]
+    lines = [
+        f"{UNIT} is neither installed in {home} nor declared in "
+        f"{manifest if manifest is not None else 'any skill-project.toml above here'}"
+        " — `sync` cannot install it",
+        f"fix:   SKILL_MANAGER_HOME={home} {cli} install {UNIT_SOURCE}",
+    ]
+    if manifest is not None:
+        lines.append(
+            f"       and add it to {manifest} so the home can be rebuilt:\n"
+            f"           [skills.{UNIT}]\n"
+            f'           source = "{UNIT_SOURCE}"\n'
+            f"       then: SKILL_MANAGER_HOME={home} {cli} project resolve"
+        )
+    return lines
+
+
+def _import_wrapper(start: str | Path = "."):
     """Import git_issue_workflow from the environment or the home's store copy."""
     try:
         import git_issue_workflow  # noqa: F401
@@ -22,17 +104,21 @@ def _import_wrapper():
         return sys.modules["git_issue_workflow"]
     except ImportError:
         pass
-    home = homes.find_home(".")
+    home = homes.find_home(start)
     if home is not None:
-        candidate = home / "skills" / "git-issue-workflow" / "src"
+        candidate = home / "skills" / UNIT / "src"
         if (candidate / "git_issue_workflow").is_dir():
             sys.path.insert(0, str(candidate))
             import git_issue_workflow
 
             return git_issue_workflow
     raise SystemExit(
-        "skt ticket: the git-issue-workflow python surface is not importable.\n"
-        "fix: skill-manager sync git-issue-workflow   # needs the SKT-2 version or later"
+        "\n".join(
+            [
+                f"skt ticket: the {UNIT} python surface is not importable.",
+                *_giw_remedy(home, start),
+            ]
+        )
     )
 
 
@@ -52,7 +138,7 @@ def _bootstrap_script() -> Path | None:
     giw = homes.find_home(".")
     if giw is None:
         return None
-    candidate = giw / "skills" / "git-issue-workflow" / "scripts" / "bootstrap-home.sh"
+    candidate = giw / "skills" / UNIT / "scripts" / "bootstrap-home.sh"
     return candidate if candidate.is_file() else None
 
 
@@ -109,7 +195,11 @@ def epic_new(ticket_id: str, base: str | None, path: str) -> int:
         git("worktree", "remove", "--force", path)
         git("branch", "-D", branch)
         print("error: bootstrap-home.sh not found in this home; worktree rolled back")
-        print("fix:   skill-manager sync git-issue-workflow, then re-run")
+        # Same fault, same distinction: a home that never installed the
+        # unit cannot sync it. See _giw_remedy.
+        for line in _giw_remedy(homes.find_home(".")):
+            print(line if line.startswith("fix:") else f"       {line}")
+        print("       then re-run")
         return 3
     proc = subprocess.run([str(bootstrap), "--root", path], capture_output=True, text=True)
     if proc.returncode != 0:

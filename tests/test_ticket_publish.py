@@ -292,3 +292,78 @@ def test_edited_units_bounds_its_probes_and_does_not_repeat_them(tmp_path, monke
     assert len(set(deadlines)) == 1, "and they SHARE one deadline, not one each"
     assert len(local_calls) == len(set(local_calls)) == 2, \
         f"_local_state runs once per unit, not twice: {local_calls}"
+
+# --- skill-publisher-skill#21: a remedy that cannot run ---------------------
+#
+# Both remedy strings named `skill-manager sync git-issue-workflow`. In the
+# homes that actually hit this the unit was neither installed nor declared,
+# and `sync` cannot install — it pulls an ALREADY-installed unit to its
+# latest source. Confirmed identically in `constituents/skill-manager`'s home
+# and `constituents/meta-orchestrator`'s during ARTI-00; five sightings this
+# epic. Not-installed and not-synced are different faults.
+
+
+def _remedy_home(tmp_path, monkeypatch, *, installed: bool, declared: bool,
+                 manifest: bool = True):
+    from test_status import make_home, make_repo
+
+    repo = make_repo(tmp_path / "repo")
+    home = make_home(repo, units={})
+    if installed:
+        (home / "skills" / "git-issue-workflow").mkdir(parents=True)
+    if manifest:
+        body = '[project]\nname = "p"\n'
+        if declared:
+            body += ('[skills.git-issue-workflow]\n'
+                     'source = "github:haydenrear/git-issue-workflow-skill"\n')
+        (repo / "skill-project.toml").write_text(body)
+    monkeypatch.setenv("SKILL_MANAGER_HOME", str(home))
+    monkeypatch.chdir(repo)
+    return repo, home
+
+
+def _refusal(monkeypatch, repo) -> str:
+    from skt import ticket as ticket_mod
+
+    # the environment copy must not satisfy the import under test
+    monkeypatch.setitem(sys.modules, "git_issue_workflow", None)
+    with pytest.raises(SystemExit) as exc:
+        ticket_mod._import_wrapper(repo)
+    return str(exc.value)
+
+
+def test_remedy_for_a_unit_that_was_never_installed_names_install(tmp_path, monkeypatch):
+    """The measured case. Before #21 this said `sync`, which cannot install."""
+    repo, home = _remedy_home(tmp_path, monkeypatch, installed=False, declared=False)
+    message = _refusal(monkeypatch, repo)
+    assert "neither installed" in message
+    assert "`sync` cannot install it" in message
+    assert "skill-manager install github:haydenrear/git-issue-workflow-skill" in message
+    assert "[skills.git-issue-workflow]" in message  # the manifest entry too
+    assert "project resolve" in message
+
+
+def test_remedy_for_a_declared_but_uninstalled_unit_names_project_resolve(tmp_path, monkeypatch):
+    repo, home = _remedy_home(tmp_path, monkeypatch, installed=False, declared=True)
+    message = _refusal(monkeypatch, repo)
+    assert "is declared in" in message
+    assert "project resolve" in message
+    assert " install github:" not in message
+
+
+def test_remedy_for_an_installed_but_stale_unit_still_names_sync(tmp_path, monkeypatch):
+    """`sync` was right for exactly one of the three states; keep it there."""
+    repo, home = _remedy_home(tmp_path, monkeypatch, installed=True, declared=True)
+    message = _refusal(monkeypatch, repo)
+    assert "carries no importable python surface" in message
+    assert "sync git-issue-workflow --git-latest" in message
+    assert "install github:" not in message
+
+
+def test_remedy_names_the_homes_own_pinned_cli_when_it_has_one(tmp_path, monkeypatch):
+    repo, home = _remedy_home(tmp_path, monkeypatch, installed=True, declared=True)
+    pin = home / "bin" / "cli" / "skill-manager"
+    pin.parent.mkdir(parents=True, exist_ok=True)
+    pin.write_text("#!/bin/sh\n")
+    message = _refusal(monkeypatch, repo)
+    assert f"{pin} sync git-issue-workflow" in message
