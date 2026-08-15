@@ -1,4 +1,5 @@
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -126,3 +127,111 @@ def test_sync_then_check_does_not_claim_the_unit_is_ahead(tmp_path, monkeypatch,
     report = check_mod.collect(repo)
     assert all(n["kind"] != "sync-with-root" for n in report["notifications"]), report
     assert report["notifications"] == [], report
+
+# --- skill-publisher-skill#14: the root tier has no pinned CLI ---------------
+#
+# `<home>/bin/cli/skill-manager` is written by `skill-manager home shims`. An
+# operator root installed from brew that never ran it has no pin, so the hard
+# refusal made `skt sync` unavailable at the one tier that publishes globally.
+# The pin still wins where it exists, and the fallback is ROOT-only: below
+# root, falling through to another CLI is the failure the pin exists to remove.
+
+
+def prepend_path(monkeypatch, bindir: Path) -> None:
+    """Put `bindir` FIRST on PATH, keeping the real one (git/bash/python3)."""
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+
+
+def path_cli(bindir: Path, body: str) -> Path:
+    """A `skill-manager` on PATH — what a brew install leaves behind."""
+    bindir.mkdir(parents=True, exist_ok=True)
+    cli = bindir / "skill-manager"
+    cli.write_text("#!/usr/bin/env bash\n" + body)
+    cli.chmod(cli.stat().st_mode | stat.S_IEXEC)
+    return cli
+
+
+def moves_store(record: Path, to_hash: str) -> str:
+    """A CLI body that does what a real sync does: advance the installed record."""
+    return (
+        f"python3 -c \"import json;p='{record}';d=json.load(open(p));"
+        f"d['gitHash']='{to_hash}';json.dump(d,open(p,'w'))\"\n"
+    )
+
+
+def test_root_tier_falls_back_to_path_cli_and_says_so(tmp_path, monkeypatch, capsys):
+    """Before #14 this printed `home CLI not found` and exited 1."""
+    fake_root = tmp_path / "fake-root"
+    repo = make_repo(fake_root / "anywhere")
+    bare, tip = make_unit_upstream(tmp_path, "alpha")
+    home = make_home(fake_root, units={"alpha": unit_record(bare, tip)})
+    new_tip = advance_upstream(bare, tmp_path)
+    cli = path_cli(tmp_path / "brew-bin", moves_store(home / "installed" / "alpha.json", new_tip))
+    prepend_path(monkeypatch, cli.parent)
+    assert not (home / "bin" / "cli" / "skill-manager").exists()
+
+    assert sync_mod.run("alpha", start=repo) == 0
+    out = capsys.readouterr().out
+    assert f"skt sync: using PATH skill-manager at {cli}" in out
+    assert "root tier; this home has no pinned CLI" in out
+    assert new_tip[:8] in out
+
+
+def test_home_pin_wins_over_path_and_is_named(tmp_path, monkeypatch, capsys):
+    fake_root = tmp_path / "fake-root"
+    repo = make_repo(fake_root / "anywhere")
+    bare, tip = make_unit_upstream(tmp_path, "alpha")
+    home = make_home(fake_root, units={"alpha": unit_record(bare, tip)})
+    new_tip = advance_upstream(bare, tmp_path)
+    fake_cli(home, moves_store(home / "installed" / "alpha.json", new_tip))
+    # a PATH CLI that fails loudly if it is ever the one chosen
+    other = path_cli(tmp_path / "brew-bin", "echo WRONG-CLI >&2; exit 9\n")
+    prepend_path(monkeypatch, other.parent)
+
+    assert sync_mod.run("alpha", start=repo) == 0
+    pin = home / "bin" / "cli" / "skill-manager"
+    assert f"skt sync: using this home's pinned CLI at {pin}" in capsys.readouterr().out
+
+
+def test_non_root_tier_still_refuses_without_a_pin(tmp_path, monkeypatch, capsys):
+    """The fallback is ROOT-only: a project home must not use a stray CLI."""
+    repo = make_repo(tmp_path / "repo")
+    bare, tip = make_unit_upstream(tmp_path, "alpha")
+    home = make_home(repo, units={"alpha": unit_record(bare, tip)})
+    cli = path_cli(tmp_path / "brew-bin", "exit 0\n")
+    prepend_path(monkeypatch, cli.parent)
+
+    assert sync_mod.run("alpha", start=repo) == 1
+    out = capsys.readouterr().out
+    assert str(home / "bin" / "cli" / "skill-manager") in out
+    assert "project-tier home has no pinned CLI" in out
+
+
+def test_root_tier_refuses_another_homes_pin_on_path(tmp_path, monkeypatch, capsys):
+    """A foreign pin derives ITS home from its own location and would write it."""
+    fake_root = tmp_path / "fake-root"
+    repo = make_repo(fake_root / "anywhere")
+    bare, tip = make_unit_upstream(tmp_path, "alpha")
+    make_home(fake_root, units={"alpha": unit_record(bare, tip)})
+    other_home = tmp_path / "some-project" / ".skill-manager"
+    foreign = path_cli(other_home / "bin" / "cli", "exit 0\n")
+    prepend_path(monkeypatch, foreign.parent)
+
+    assert sync_mod.run("alpha", start=repo) == 1
+    out = capsys.readouterr().out
+    assert "is another home's pin" in out
+    assert str(other_home) in out
+
+
+def test_root_tier_with_no_cli_anywhere_names_both_remedies(tmp_path, monkeypatch, capsys):
+    fake_root = tmp_path / "fake-root"
+    repo = make_repo(fake_root / "anywhere")
+    bare, tip = make_unit_upstream(tmp_path, "alpha")
+    make_home(fake_root, units={"alpha": unit_record(bare, tip)})
+    # a PATH with git/bash/python3 but deliberately no skill-manager
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    assert sync_mod.run("alpha", start=repo) == 1
+    out = capsys.readouterr().out
+    assert "no `skill-manager` on PATH" in out
+    assert "home shims" in out
