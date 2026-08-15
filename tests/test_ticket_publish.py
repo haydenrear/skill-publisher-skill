@@ -367,3 +367,101 @@ def test_remedy_names_the_homes_own_pinned_cli_when_it_has_one(tmp_path, monkeyp
     pin.write_text("#!/bin/sh\n")
     message = _refusal(monkeypatch, repo)
     assert f"{pin} sync git-issue-workflow" in message
+
+
+# --- skill-manager#182, skt side: publish narrows the home sync -------------
+#
+# The sync that makes an edit teardown-safe carried EVERY unit, so one
+# unrelated conflicted unit failed it and the publish stopped. `--unit`
+# landed in skill-manager (#191, 88cacd1); this is the caller.
+
+
+def _publish_cli(home: Path, body: str) -> Path:
+    """A CLI whose `home sync` behaviour the test controls."""
+    calls = home / "cli-calls.log"
+    cli = home / "bin" / "cli" / "skill-manager"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("#!/usr/bin/env bash\n" + f'echo "$@" >> "{calls}"\n' + body)
+    cli.chmod(cli.stat().st_mode | stat.S_IEXEC)
+    return calls
+
+
+def test_publish_narrows_the_home_sync_to_the_unit(tmp_path, capsys):
+    repo, home, _ = edited_home(tmp_path)
+    (tmp_path / "fake-root" / ".skill-manager" / "installed").mkdir(parents=True)
+    calls = _publish_cli(home, "exit 0\n")
+
+    assert publish_mod.run("alpha", ticket="T-7", start=repo) == 0
+    sync_line = calls.read_text().splitlines()[0]
+    assert sync_line.startswith("home sync --from")
+    assert sync_line.endswith("--merge --unit alpha")
+    assert "alpha only" in capsys.readouterr().out
+
+
+def test_publish_falls_back_when_the_cli_predates_the_flag(tmp_path, capsys):
+    """An OLD pin must degrade to the whole home, loudly — never hard-fail.
+
+    Every project and worktree home currently carries a pre-#182 pin, so a
+    hard failure would take publish from "blocked when a neighbour
+    conflicts" to "blocked always".
+    """
+    repo, home, _ = edited_home(tmp_path)
+    (tmp_path / "fake-root" / ".skill-manager" / "installed").mkdir(parents=True)
+    # picocli's real output, measured against the pre-#182 CLI
+    calls = _publish_cli(home, """
+for a in "$@"; do
+  if [ "$a" = "--unit" ]; then
+    echo "Unknown options: '--unit', 'alpha'" >&2
+    echo "Usage: skill-manager home sync [-hv] [--dry-run] [--json] [--merge]" >&2
+    exit 2
+  fi
+done
+exit 0
+""")
+
+    assert publish_mod.run("alpha", ticket="T-7", start=repo) == 0
+    lines = calls.read_text().splitlines()
+    assert lines[0].endswith("--merge --unit alpha"), "it tries narrowed first"
+    assert lines[1].endswith("--merge") and "--unit" not in lines[1], "then whole-home"
+    assert lines[2] == "unit publish alpha --ticket T-7", "and the publish still happens"
+    out = capsys.readouterr().out
+    assert "predates `home sync --unit`" in out, "the fallback is announced, not silent"
+    assert "whole home" in out
+
+
+def test_publish_does_NOT_fall_back_when_the_unit_name_is_wrong(tmp_path, capsys):
+    """The collision that makes the exit code useless on its own.
+
+    picocli returns 2 for an unknown option, and skill-manager#182 as first
+    merged returned 2 for a unit name neither home holds. Retrying
+    whole-home on the second would silently do exactly what #182 exists to
+    avoid, so the discrimination is picocli's signature, not the code.
+    """
+    repo, home, _ = edited_home(tmp_path)
+    (tmp_path / "fake-root" / ".skill-manager" / "installed").mkdir(parents=True)
+    calls = _publish_cli(home, """
+for a in "$@"; do
+  if [ "$a" = "--unit" ]; then
+    echo "home sync --unit alpha: no unit named 'alpha' in either home" >&2
+    exit 2
+  fi
+done
+exit 0
+""")
+
+    assert publish_mod.run("alpha", ticket="T-7", start=repo) == 2
+    lines = calls.read_text().splitlines()
+    assert len(lines) == 1, f"exactly one sync attempt, no retry: {lines}"
+    assert "--unit alpha" in lines[0]
+    assert "unit publish" not in calls.read_text(), "and nothing was published"
+
+
+def test_publish_reports_the_unknown_unit_exit_distinctly(tmp_path, capsys):
+    """Exit 12 can only come from a CLI that HAS --unit, so it is unambiguous."""
+    repo, home, _ = edited_home(tmp_path)
+    (tmp_path / "fake-root" / ".skill-manager" / "installed").mkdir(parents=True)
+    calls = _publish_cli(home, 'case "$1 $2" in "home sync") exit 12;; esac\nexit 0\n')
+
+    assert publish_mod.run("alpha", ticket="T-7", start=repo) == 12
+    assert len(calls.read_text().splitlines()) == 1, "no whole-home retry"
+    assert "no unit named 'alpha'" in capsys.readouterr().out
