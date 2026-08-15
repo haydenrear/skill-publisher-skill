@@ -26,6 +26,17 @@ report", and stale notifications must not re-fire as exit 10 on every
 tool call). Refreshing is the live path's job — `skt check`, or the
 SessionStart hook's bounded refresh — never the hook tool-event path's.
 
+Both halves of the live path read the SAME clock. The remote tip comes
+from `git ls-remote`; the local verdicts are then adjudicated against
+that tip rather than against `@{upstream}`, which is a local ref only a
+fetch moves. Units where the two agree and only the local ref disagrees
+are reported under `upstream_stale` / `ahead_of_remote` and are NOT
+notifications: a prompt to publish or pull with nothing behind it was
+the defect. The adjudication is `merge-base --is-ancestor` in the store
+checkout — local, clamped to the same deadline, no extra network — and
+it runs only for units that would otherwise have produced a message.
+`--cached` is untouched: it still costs exactly one state-file read.
+
 The live path owns one wall-clock deadline (NETWORK_BUDGET_SECONDS),
 shared by the remote and root-local phases: every git child runs in its
 own process group and the whole group is SIGKILLed and reaped when its
@@ -48,7 +59,12 @@ from pathlib import Path
 from . import context as ctx_mod
 from . import homes
 
-SCHEMA_VERSION = 1
+# 2: the record gained `upstream_stale` and `ahead_of_remote`. Purely
+# additive, and every reader uses `.get(...) or []`, so a v1 record still
+# loads and nothing gates on the number — but the constant IS the
+# record's description, and leaving it at 1 would have it describe a
+# record that no longer exists.
+SCHEMA_VERSION = 2
 DEFAULT_TTL_SECONDS = 900
 NOTIFY_EXIT = 10
 REMOTE_TIMEOUT_SECONDS = 10
@@ -58,6 +74,12 @@ LOCAL_TIMEOUT_SECONDS = 2  # per root-local git call — a hung `status` must no
 CACHE_FRESH = "fresh"
 CACHE_MISSING = "missing"
 CACHE_EXPIRED = "expired"
+
+# Two verdicts that are NOT notifications: the store and the remote agree,
+# and only a local ref disagrees. Reported so the state is visible and the
+# `--json` consumer can see it, but never as work to do — a prompt to
+# publish or pull that has nothing behind it is the defect, not the cure.
+STATE_UPSTREAM_STALE = "upstream-stale"
 
 
 def _run_git(argv: list[str], timeout: float) -> subprocess.CompletedProcess | None:
@@ -124,8 +146,31 @@ def _store_dir(home: Path, unit: homes.Unit) -> Path | None:
     return None
 
 
-def _local_state(unit_dir: Path, *, deadline: float | None = None) -> str:
-    """'clean' | 'dirty' | 'ahead' | 'unknown' for a store checkout.
+def _is_ancestor(unit_dir: Path, ancestor: str, descendant: str, timeout: float) -> bool | None:
+    """Is `ancestor` reachable from `descendant` IN THIS CHECKOUT?
+
+    True/False when git could decide, None when it could not — and the
+    interesting None is exit 128, "not a valid object name", which is
+    exactly what a genuinely un-fetched commit gives. That makes the
+    probe self-selecting and network-free: a store that really is stale
+    does not have the remote tip locally and answers None, while a store
+    that already contains it answers True.
+    """
+    proc = _run_git(
+        ["git", "-C", str(unit_dir), "merge-base", "--is-ancestor", ancestor, descendant], timeout
+    )
+    if proc is None:
+        return None
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1:
+        return False
+    return None  # 128: the object is not in this checkout
+
+
+def _local_state(unit_dir: Path, *, deadline: float | None = None,
+                 remote_tip: str | None = None) -> str:
+    """'clean' | 'dirty' | 'ahead' | 'upstream-stale' | 'unknown'.
 
     Both probes are bounded (per-call cap AND the shared deadline). A
     probe that timed out reports 'unknown', never 'clean': a publish
@@ -134,6 +179,18 @@ def _local_state(unit_dir: Path, *, deadline: float | None = None) -> str:
     TTL is the same lie in the other direction. The caller labels
     'unknown' as unverifiable, which also keeps an all-timed-out
     refresh out of the cache.
+
+    `rev-list --count @{upstream}..HEAD` on its own cannot tell unpushed
+    work from a stale remote-tracking ref: `@{upstream}` is a LOCAL ref
+    that only a fetch moves, and the store checkout is advanced by a
+    path that does not always move it. Measured in this repo's project
+    home: six units reported 5-52 commits "ahead" while every one of
+    them had HEAD exactly equal to its live remote tip. So where the
+    caller knows the live tip, the count is adjudicated against it —
+    locally, with no extra network — and a store whose HEAD the remote
+    already contains is 'upstream-stale' (nothing to publish; the local
+    ref is behind), never 'ahead'. Without a tip the verdict stays
+    'ahead', because nothing available can separate the two.
     """
     if not (unit_dir / ".git").exists():
         return "clean"
@@ -154,6 +211,8 @@ def _local_state(unit_dir: Path, *, deadline: float | None = None) -> str:
     if proc is None:
         return "unknown"
     if proc.returncode == 0 and proc.stdout.strip() and int(proc.stdout.strip()) > 0:
+        if remote_tip and _is_ancestor(unit_dir, "HEAD", remote_tip, _timeout()) is True:
+            return STATE_UPSTREAM_STALE
         return "ahead"
     return "clean"
 
@@ -170,6 +229,8 @@ def collect(start: str | Path = ".", *, use_network: bool = True) -> dict:
     notifications: list[dict] = []
     checked: list[str] = []
     unverifiable: list[str] = []
+    upstream_stale: list[str] = []
+    ahead_of_remote: list[str] = []
     managed = [u for u in homes.read_units(home) if u.change_managed]
     tips: dict[str, str | None] = {}
     # One deadline for the whole command: both git phases clamp every
@@ -203,28 +264,53 @@ def collect(start: str | Path = ".", *, use_network: bool = True) -> dict:
             pool.shutdown(wait=False, cancel_futures=True)
     for unit in managed:
         checked.append(unit.name)
+        store = _store_dir(home, unit)
         if use_network:
             tip = tips.get(unit.name)
             if tip is None:
                 unverifiable.append(unit.name)
             elif tip != unit.git_hash:
-                # Compared against the origin's default-branch tip: installed
-                # records carry no ref pin, so a deliberately pinned unit can
-                # appear here — the message states what was compared.
-                notifications.append(
-                    {
-                        "kind": "new-version",
-                        "unit": unit.name,
-                        "installed": (unit.git_hash or "")[:8],
-                        "remote": tip[:8],
-                        "message": f"new version available for {unit.name} — pull with: skt sync {unit.name}",
-                    }
+                # `installed != tip` is not the same question as "is there
+                # anything to pull". A store carrying a commit the remote
+                # does not have yet differs from the tip in the OTHER
+                # direction, and telling that agent to pull is wrong — it
+                # is what made `debugging` a false notification in ARTI-00.
+                # Ancestry decides it, locally: if this checkout already
+                # contains the tip, there is nothing upstream to fetch.
+                contains_tip = (
+                    _is_ancestor(
+                        store, tip, "HEAD",
+                        min(float(LOCAL_TIMEOUT_SECONDS), deadline - time.monotonic()),
+                    )
+                    if store is not None
+                    else None
                 )
+                if contains_tip is True:
+                    ahead_of_remote.append(unit.name)
+                else:
+                    # Compared against the origin's default-branch tip: installed
+                    # records carry no ref pin, so a deliberately pinned unit can
+                    # appear here — the message states what was compared.
+                    notifications.append(
+                        {
+                            "kind": "new-version",
+                            "unit": unit.name,
+                            "installed": (unit.git_hash or "")[:8],
+                            "remote": tip[:8],
+                            "message": f"new version available for {unit.name} — pull with: skt sync {unit.name}",
+                        }
+                    )
         if tier == "root":
-            unit_dir = _store_dir(home, unit)
+            unit_dir = store
             if unit_dir:
-                state = _local_state(unit_dir, deadline=deadline)
-                if state == "unknown":
+                state = _local_state(
+                    unit_dir, deadline=deadline, remote_tip=tips.get(unit.name)
+                )
+                if state == STATE_UPSTREAM_STALE:
+                    # The remote already has this HEAD. Nothing to publish;
+                    # only `@{upstream}` is behind. Recorded, not prompted.
+                    upstream_stale.append(unit.name)
+                elif state == "unknown":
                     # The probe never finished: an evidence gap, not a
                     # verdict. Labeling it keeps the cached record honest
                     # and the refusal predicate counting it.
@@ -248,6 +334,11 @@ def collect(start: str | Path = ".", *, use_network: bool = True) -> dict:
         "tier": tier,
         "checked_units": checked,
         "unverifiable": unverifiable,
+        # Agreement between store and remote that only a LOCAL ref
+        # contradicts. Neither is a notification; both are reported so
+        # the state is inspectable and `--json` consumers can see it.
+        "upstream_stale": upstream_stale,
+        "ahead_of_remote": ahead_of_remote,
         "network": use_network,
         "checked_at": time.time(),
         "notifications": notifications,
@@ -345,19 +436,37 @@ def render_text(report: dict) -> str:
         return "\n".join(lines)
     notes = report["notifications"]
     unverifiable = report.get("unverifiable") or []
+    stale_ref = report.get("upstream_stale") or []
+    ahead_of_remote = report.get("ahead_of_remote") or []
     if not notes:
         scope = f"{len(report['checked_units'])} change-managed unit(s)"
         line = f"skt check: all current ({scope}, tier {report['tier']})"
         if unverifiable:
             line += f"; unverifiable: {', '.join(unverifiable)}"
-        return line
+        return "\n".join([line, *_ref_lines(stale_ref, ahead_of_remote)])
     lines = [f"skt check: {len(notes)} notification(s), tier {report['tier']}"]
     lines += [f"  {n['message']}" for n in notes]
     if unverifiable:
         lines.append(f"  unverifiable (remote unreachable): {', '.join(unverifiable)}")
+    lines += _ref_lines(stale_ref, ahead_of_remote)
     if report.get("hint"):
         lines.append(f"  hint: {report['hint']}")
     return "\n".join(lines)
+
+
+def _ref_lines(stale_ref: list, ahead_of_remote: list) -> list[str]:
+    """State worth seeing, phrased so it cannot read as work to do."""
+    lines = []
+    if stale_ref:
+        lines.append(
+            f"  published, local ref behind (nothing to publish): {', '.join(stale_ref)}"
+            f" — refresh with: git -C <store> fetch"
+        )
+    if ahead_of_remote:
+        lines.append(
+            f"  ahead of the remote tip (nothing to pull): {', '.join(ahead_of_remote)}"
+        )
+    return lines
 
 
 def run(*, as_json: bool, cached: bool, ttl: int = DEFAULT_TTL_SECONDS, start: str | Path = ".") -> int:

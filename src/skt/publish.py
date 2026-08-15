@@ -12,25 +12,66 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import context as ctx_mod
 from . import homes
-from .check import _local_state, _store_dir
+from .check import (
+    LOCAL_TIMEOUT_SECONDS,
+    NETWORK_BUDGET_SECONDS,
+    STATE_UPSTREAM_STALE,
+    _is_ancestor,
+    _local_state,
+    _remote_tip_safe,
+    _store_dir,
+)
 
 CHECK_EXIT = 10
 
 
 def edited_units(home: Path | None) -> list[dict]:
+    """Units in this home carrying work their own repository does not have.
+
+    A store whose `@{upstream}` is behind looks "ahead" to a bare
+    rev-list even when every one of those commits is published
+    (skill-publisher-skill#15). That false verdict is not cosmetic here:
+    `skt publish` with no unit name REFUSES when more than one unit is
+    edited, and `skt ticket close` warns on each — so a home with a
+    handful of stale refs could not publish anything at all.
+
+    One wall-clock deadline covers the whole pass, the way `collect()`
+    bounds `skt check`. Without it this walked every still-ahead unit
+    serially at `_remote_tip`'s 10s fallback: on the measured home, six
+    falsely-ahead units meant an offline `skt publish --check` — or the
+    `skt ticket close` leftovers gate, which is where it hurts most —
+    could stall about a minute where it used to be instant. Nothing here
+    is on a hook path, so the budget is the whole command's rather than a
+    hook's, but "bounded" is not optional at a teardown gate.
+
+    A probe the budget cut short leaves the unit reported, not dropped.
+    That is the same direction `_local_state` chooses for `unknown`: at a
+    gate whose job is to refuse while unpublished work exists, an
+    evidence gap must never read as "nothing here".
+    """
     if home is None:
         return []
+    deadline = time.monotonic() + NETWORK_BUDGET_SECONDS
     out: list[dict] = []
     for unit in homes.read_units(home):
         unit_dir = _store_dir(home, unit)
         if unit_dir is None:
             continue
-        state = _local_state(unit_dir)
-        if state != "clean":
+        state = _local_state(unit_dir, deadline=deadline)
+        if state == "ahead" and unit.change_managed:
+            # Adjudicate in place rather than re-running `_local_state`
+            # with a tip: that repeated the `status` and `rev-list` calls
+            # whose answers are already in hand, for every ahead unit.
+            tip = _remote_tip_safe(unit.origin, unit.git_ref, deadline=deadline)
+            timeout = min(float(LOCAL_TIMEOUT_SECONDS), deadline - time.monotonic())
+            if tip and _is_ancestor(unit_dir, "HEAD", tip, timeout) is True:
+                state = STATE_UPSTREAM_STALE
+        if state not in ("clean", STATE_UPSTREAM_STALE):
             out.append({"unit": unit.name, "state": state, "dir": str(unit_dir)})
     return out
 
