@@ -33,8 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="skt",
         description=(
             "Skill-lifecycle CLI: startup disclosure of loaded skills/plugins, "
-            "home tier and epic/ticket state; new-version, sync-with-root and "
-            "stale-artifact notifications; per-artifact rebuilds; worktree "
+            "home tier and epic/ticket state; new-version, sync-with-root, unit-error "
+            "and stale-artifact notifications; per-artifact rebuilds; worktree "
             "change management."
         ),
     )
@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     check = sub.add_parser(
         "check",
-        help="new-version, sync-with-root and stale-artifact notifications",
+        help="new-version, sync-with-root, unit-error and stale-artifact notifications",
     )
     check.add_argument("--cached", action="store_true", help="throttled, no-network path")
     check.add_argument("--ttl", type=int, default=900, help="cache freshness window in seconds")
