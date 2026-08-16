@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 # Subcommand -> (implementing ticket, issue URL) for honest stubs.
 # Empty since SKT-5; kept for future subcommands landing across tickets.
