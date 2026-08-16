@@ -1,10 +1,32 @@
-"""`skt check` — new-version and sync-with-root notifications.
+"""`skt check` — new-version, sync-with-root and stale-artifact notifications.
 
 Pull-side (every tier): compare each change-managed unit's installed
 gitHash against its remote tip (`git ls-remote`). Push-side (ROOT tier
 only): a unit's store checkout that is dirty or ahead of its remote is
 work nobody else can see — prompt the publish. Project homes are
 updated from `wt`-created imports, so they get pull-side messages only.
+
+Artifact-side (every tier): a unit moving is only half the news. The
+half that unblocks a fast fix is WHICH derived artifact went stale as a
+result and the one command that lands it, so a third notification kind
+rides beside the other two:
+
+    artifact computeq is stale (deploy-helm moved a3f21c8 -> 9b17e40)
+      rebuild with: skt build computeq
+
+It is built ONLY from `skt.artifacts`' `rebuildable` set — an artifact
+that is on disk, no longer describes its inputs, and that `skt build`
+really produces. The operator's project home holds 55 stale artifacts
+and 7 of those; 11 of the rest were declared and never built, which is a
+lazily-built home's normal state and not news. Enumerating all 55 into
+every session is the failure this filter exists to prevent, and the
+counts for what it drops stay in the report under `artifacts`.
+
+**The artifact probe is on the LIVE path and nowhere else.** It is a
+subprocess, and `--cached` is contract-cache-only in every cache state
+(below). `skt.artifacts` is imported INSIDE `collect()` rather than at
+the top of this file, so the cache-only path does not so much as load
+the module that could spawn one.
 
 `--cached` is contract-cache-only: it reads the state file and NOTHING
 else — no subprocess, no network, no fallback to a live check, whatever
@@ -64,7 +86,11 @@ from . import homes
 # loads and nothing gates on the number — but the constant IS the
 # record's description, and leaving it at 1 would have it describe a
 # record that no longer exists.
-SCHEMA_VERSION = 2
+# 3: the record gained `artifacts` (ARTI-10) and notifications of kind
+# `stale-artifact`. Additive on the same terms: an older record has no
+# `artifacts` key, `skt status` reads it with `.get`, and a reader that
+# does not know the kind still gets a `message`.
+SCHEMA_VERSION = 3
 DEFAULT_TTL_SECONDS = 900
 NOTIFY_EXIT = 10
 REMOTE_TIMEOUT_SECONDS = 10
@@ -80,6 +106,23 @@ CACHE_EXPIRED = "expired"
 # `--json` consumer can see it, but never as work to do — a prompt to
 # publish or pull that has nothing behind it is the defect, not the cure.
 STATE_UPSTREAM_STALE = "upstream-stale"
+
+# The artifact probe's slice of the SAME wall budget the git phases spend
+# from — never an extension of it. The measured per-invocation CLI floor is
+# ~1.2 s, so this is room for a read plus slack, and a probe that starts
+# after the budget is gone spawns nothing at all and is reported `timeout`.
+ARTIFACT_BUDGET_SECONDS = 6
+
+# How many stale artifacts may be named individually. `skt status` and the
+# hook injection both carry this text into every session, and a lazily-built
+# home has dozens — the rest are counted, and render_text says how many.
+MAX_ARTIFACT_NOTIFICATIONS = 3
+
+# Opt-OUT, deliberately, and never an opt-in. skt#22 was an env-GATED
+# behaviour that changed what a session got depending on a variable nobody
+# set; the default here is on in every session, and the switch exists only
+# so an operator who has measured a reason can turn one probe off.
+ARTIFACTS_ENV = "SKT_ARTIFACTS"
 
 
 def _run_git(argv: list[str], timeout: float) -> subprocess.CompletedProcess | None:
@@ -221,6 +264,145 @@ def state_file(home: Path) -> Path:
     return home / "cache" / "skt-check.json"
 
 
+def _artifact_state(home: Path, deadline: float) -> dict:
+    """The `artifacts` block of the record. LIVE PATH ONLY.
+
+    One CLI call, and a typed `state` on every path so a reader can always
+    tell WHY it is looking at no rows:
+
+      ok            the counts and rows below are this pass's measurement
+      unsupported   this home's skill-manager predates the artifact graph
+      no-cli        this home holds no CLI pin to ask
+      timeout       the probe did not finish inside its slice of the budget
+      error         anything else, with the CLI's own reason attached
+      off           SKT_ARTIFACTS=0
+
+    None of those is an empty result presented as a clean one — "nothing is
+    stale" and "I could not ask" are different answers, which is the whole
+    reason `skt.artifacts` raises instead of returning `()`.
+
+    `rows` carries ONLY the rebuildable set, because it is the only set a
+    notification may be built from and the only one that is enumerated
+    anywhere. The other stale artifacts are counted and not listed.
+    """
+    if os.environ.get(ARTIFACTS_ENV, "").strip() in ("0", "false", "no"):
+        return {"state": "off", "reason": f"{ARTIFACTS_ENV} is set to off"}
+    # Imported HERE, not at module scope: `--cached` must not load a module
+    # whose whole job is to run a subprocess, and `publish` -> `check` would
+    # make a module-level import circular besides.
+    from . import artifacts as artifacts_mod
+
+    budget = min(float(ARTIFACT_BUDGET_SECONDS), deadline - time.monotonic())
+    try:
+        survey = artifacts_mod.stale(home=home, timeout=budget)
+    except artifacts_mod.ArtifactsUnsupported as exc:
+        return {"state": "unsupported", "reason": exc.reason, "fix": exc.fix}
+    except artifacts_mod.CliUnavailable as exc:
+        return {"state": "no-cli", "reason": exc.reason, "fix": exc.fix}
+    except artifacts_mod.ProbeTimeout as exc:
+        return {"state": "timeout", "reason": exc.reason, "fix": exc.fix}
+    except artifacts_mod.ArtifactError as exc:
+        return {"state": "error", "reason": exc.reason, "fix": exc.fix}
+    except Exception as exc:  # noqa: BLE001 — never a traceback in a session
+        return {"state": "error", "reason": f"{type(exc).__name__}: {exc}", "fix": ""}
+    rebuildable = survey.rebuildable
+    return {
+        "state": "ok",
+        "total": survey.total,
+        "stale": len(survey.stale),
+        "unverifiable": len(survey.unverifiable),
+        "current": survey.current,
+        "not_built": len(survey.not_built),
+        "rebuildable": len(rebuildable),
+        "rows": [
+            {
+                "id": row.id,
+                "name": row.short_name,
+                "kind": row.kind,
+                "owner": row.owner,
+                "reason": row.reason,
+                "because": list(row.because),
+            }
+            for row in rebuildable
+        ],
+    }
+
+
+def _artifact_cause(row: dict, moved: dict) -> str:
+    """Why this artifact is stale, in one clause, from TYPED evidence.
+
+    Preference order, and the reason for it: an upstream `unit-store:<u>`
+    that this same pass ALSO found a new version for gives both hashes
+    typed, so the clause can say what moved and to what. Failing that, an
+    upstream unit-store row is itself the cause and is named. Failing
+    that, the artifact's own inputs moved and the verdict's own reason is
+    quoted verbatim.
+
+    What this deliberately does NOT do is parse the verdict's prose for
+    the hashes inside it. `wt.py`'s docstring records what parsing another
+    tool's prose costs; a shorter sentence is not worth it.
+    """
+    units = [b.split(":", 1)[1] for b in row.get("because") or [] if b.startswith("unit-store:")]
+    for unit in units:
+        note = moved.get(unit)
+        if note:
+            return f"{unit} moved {note['installed']} -> {note['remote']}"
+    if units:
+        extra = f" (+{len(units) - 1} more)" if len(units) > 1 else ""
+        return f"{units[0]} moved{extra}"
+    return row.get("reason") or "its inputs no longer match what was recorded"
+
+
+def _artifact_notifications(state: dict, unit_notes: list[dict]) -> list[dict]:
+    """`stale-artifact` rows, bounded, from the rebuildable set only.
+
+    An artifact that was declared and never built is not surfaced: that is
+    the normal state of a lazily-provisioned home, and a notification that
+    fires in the healthy case is one an agent learns to ignore.
+    """
+    if state.get("state") != "ok":
+        return []
+    moved = {n["unit"]: n for n in unit_notes if n.get("kind") == "new-version"}
+
+    def _already_said(row: dict) -> int:
+        """0 if nothing else in this report explains this row, 1 if it does.
+
+        Only `MAX_ARTIFACT_NOTIFICATIONS` rows are named, so which ones is
+        a real decision. An artifact stale because a unit moved sits under
+        that unit's own `new-version` line, three lines above; an artifact
+        whose OWN re-derived fingerprint diverged is carried by nothing
+        else in the report. Measured on the operator's project home with
+        one planted edit: without this the three named rows were all
+        downstream of two units already named above, and the planted
+        artifact — the only news in the report — fell into `+5 more`.
+
+        Stable within each group: this only decides which half of the list
+        a row is in, never the order inside it.
+        """
+        return int(any(
+            b.split(":", 1)[1] in moved
+            for b in row.get("because") or [] if b.startswith("unit-store:")
+        ))
+
+    ordered = sorted(state.get("rows") or [], key=_already_said)
+    out = []
+    for row in ordered[:MAX_ARTIFACT_NOTIFICATIONS]:
+        name = row["name"]
+        out.append(
+            {
+                "kind": "stale-artifact",
+                "artifact": row["id"],
+                "name": name,
+                "owner": row.get("owner"),
+                "message": f"artifact {name} is stale ({_artifact_cause(row, moved)})",
+                # The command, alone, so a consumer can run it without
+                # extracting it from a sentence.
+                "fix": f"skt build {name}",
+            }
+        )
+    return out
+
+
 def collect(start: str | Path = ".", *, use_network: bool = True) -> dict:
     home = homes.find_home(start)
     if home is None:
@@ -328,10 +510,28 @@ def collect(start: str | Path = ".", *, use_network: bool = True) -> dict:
                             ),
                         }
                     )
+    # LAST, and from what the git phases have left of the shared deadline.
+    # Ordered after them so an added probe cannot make the established
+    # unit notifications later than they already were; the cost is that a
+    # pass whose remotes ate the whole budget reports the artifacts
+    # `timeout` rather than silently skipping them.
+    artifacts = _artifact_state(home, deadline)
+    artifact_notes = _artifact_notifications(artifacts, notifications)
+    if artifact_notes:
+        # The record's rows are reordered to match the notifications, so
+        # that `skt status` — which reads this block back and names a few —
+        # names the SAME few `skt check` did. Two surfaces disagreeing about
+        # which artifacts matter is how a report stops being believed.
+        rank = {note["artifact"]: i for i, note in enumerate(artifact_notes)}
+        artifacts["rows"] = sorted(
+            artifacts["rows"], key=lambda row: rank.get(row["id"], len(rank))
+        )
+    notifications += artifact_notes
     report = {
         "schema": SCHEMA_VERSION,
         "home": str(home),
         "tier": tier,
+        "artifacts": artifacts,
         "checked_units": checked,
         "unverifiable": unverifiable,
         # Agreement between store and remote that only a LOCAL ref
@@ -356,10 +556,24 @@ def _write_cache(report: dict) -> None:
         return
     checked = report.get("checked_units") or []
     unverifiable = report.get("unverifiable") or []
-    if report.get("network") and checked and len(unverifiable) >= len(checked):
+    artifacts_resolved = (report.get("artifacts") or {}).get("state") == "ok"
+    if (
+        report.get("network")
+        and checked
+        and len(unverifiable) >= len(checked)
+        and not artifacts_resolved
+    ):
         # A refresh that resolved NOTHING is a failure, not a result:
         # caching it would let --cached serve "all current (fresh)" for a
         # TTL window in which no unit was actually verified.
+        #
+        # The record now carries a SECOND, independently resolved
+        # dimension, so "nothing" has to mean both halves. A refresh that
+        # decided 190 artifacts and reached no remote did not resolve
+        # nothing, and dropping it would take the artifact notification
+        # out of every offline session — while the unit half stays honest
+        # either way, because every unresolved unit is still listed under
+        # `unverifiable` and render_text prints them.
         return
     path = state_file(Path(report["home"]))
     # Write-temp + rename in the same directory: os.replace is atomic, so
@@ -443,15 +657,45 @@ def render_text(report: dict) -> str:
         line = f"skt check: all current ({scope}, tier {report['tier']})"
         if unverifiable:
             line += f"; unverifiable: {', '.join(unverifiable)}"
-        return "\n".join([line, *_ref_lines(stale_ref, ahead_of_remote)])
+        return "\n".join(
+            [line, *_artifact_lines(report), *_ref_lines(stale_ref, ahead_of_remote)]
+        )
     lines = [f"skt check: {len(notes)} notification(s), tier {report['tier']}"]
-    lines += [f"  {n['message']}" for n in notes]
+    for note in notes:
+        lines.append(f"  {note['message']}")
+        if note.get("kind") == "stale-artifact":
+            # The command on its own line: this is the fast path for a
+            # critical fix and it has to be retypable without editing.
+            lines.append(f"    rebuild with: {note['fix']}")
+    lines += _artifact_lines(report)
     if unverifiable:
         lines.append(f"  unverifiable (remote unreachable): {', '.join(unverifiable)}")
     lines += _ref_lines(stale_ref, ahead_of_remote)
     if report.get("hint"):
         lines.append(f"  hint: {report['hint']}")
     return "\n".join(lines)
+
+
+def _artifact_lines(report: dict) -> list[str]:
+    """The overflow line, and the reason the probe found nothing.
+
+    Both are one line. A stale-artifact notification that could not be
+    made because the CLI predates the verb is worth exactly one sentence
+    in the report an agent reads at every session start — and worth more
+    than nothing, which is what silence would say.
+    """
+    state = report.get("artifacts") or {}
+    kind = state.get("state")
+    if kind == "ok":
+        shown = len([n for n in report.get("notifications") or []
+                     if n.get("kind") == "stale-artifact"])
+        extra = (state.get("rebuildable") or 0) - shown
+        if extra > 0:
+            return [f"  +{extra} more stale artifact(s) — rebuild them with: skt build --stale"]
+        return []
+    if kind in (None, "off", "no-cli"):
+        return []
+    return [f"  artifacts not checked ({kind}): {state.get('reason', '')}"]
 
 
 def _ref_lines(stale_ref: list, ahead_of_remote: list) -> list[str]:
