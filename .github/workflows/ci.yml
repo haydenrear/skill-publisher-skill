@@ -16,6 +16,12 @@
 #   units   every SKILL.md and unit manifest this repo ships still parses.
 #           A skill whose frontmatter is invalid YAML does not fail loudly, it
 #           DISAPPEARS from a sync — see .github/scripts/check_units.py.
+#   graph   the `sktSurface` validation graph (ARTI-19, #119). The two jobs
+#           above execute python that IMPORTS skt; nothing executed the
+#           artifacts this repository actually ships — the install script, the
+#           wrapper it writes, the two shell hooks, or the worktree lifecycle
+#           against a real git repository. See test_graph/build.gradle.kts for
+#           what each node claims and why an import cannot reach it.
 #
 # THE INTERPRETER IS PINNED ON PURPOSE. Bare `python3` on a developer machine
 # in this workspace is 3.14 without pytest while only 3.13 has it, so an
@@ -98,3 +104,108 @@ jobs:
       # so that lowering the bar is a diff.
       - name: Lint the shipped shell scripts
         run: shellcheck --severity=warning --exclude=SC2034,SC2164,SC2046 hooks/*.sh skill-scripts/*.sh
+
+  # ---------------------------------------------------------------- test graph
+  #
+  # `sktSurface` executes what this repository SHIPS rather than what it
+  # imports: skill-scripts/install-skt.sh on both pinned interpreters, the
+  # wrapper it writes (with no python on PATH), `skt status` against three real
+  # checkouts including a linked worktree, `skt check --cached` under an audit
+  # hook that proves it spawns nothing, both shell hooks against a real home,
+  # and `skt ticket new|info|close` against a real repository.
+  #
+  # It is one job, not a matrix: the interpreter matrix lives INSIDE the graph
+  # (skt.wrapper-installed pins 3.11 and 3.13 with `uv python`, and the nodes
+  # that read state re-run every assertion under each), so a job matrix here
+  # would multiply the same measurement rather than add one.
+  #
+  # The test-graph SDK and Gradle build logic are not vendored — the scaffold
+  # commits `provider-bindings.json` and generates the runtime links, which is
+  # the portable mode. So the skill is cloned and `prepare-bindings.py`
+  # materializes them, exactly as the skill's own reference prescribes.
+  graph:
+    name: test graph (sktSurface)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      TEST_GRAPH_ROOT: ${{ github.workspace }}/test_graph
+      TEST_GRAPH_SKILL: ${{ github.workspace }}/.test-graph-skill
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Gradle runs the graph harness. jbang and uv are auto-provisioned into
+      # test_graph/.bin by the harness when absent, but uv is installed on PATH
+      # anyway because skt.wrapper-installed resolves the interpreter matrix
+      # through `uv python find` / `uv python install`.
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Same reason as the `tests` job: several nodes build real fixture
+      # repositories, and a hosted runner has no committer identity.
+      - name: Give git a committer identity
+        run: |
+          git config --global user.email "ci@skt.invalid"
+          git config --global user.name "skt CI"
+          git config --global init.defaultBranch main
+
+      # Pulled here rather than inside the node so a download failure is
+      # attributed to the network and not to skt, and so the versions are
+      # visible in the log.
+      - name: Provision the pinned interpreter matrix
+        run: |
+          uv python install 3.11 3.13
+          uv python find 3.11
+          uv python find 3.13
+
+      - name: Restore Gradle and jbang caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.jbang
+          key: ${{ runner.os }}-test-graph-${{ hashFiles('test_graph/gradle/wrapper/gradle-wrapper.properties', 'test_graph/**/*.gradle.kts') }}
+          restore-keys: |
+            ${{ runner.os }}-test-graph-
+
+      - name: Install the test-graph skill (it provides the SDK and build logic)
+        run: |
+          git clone --depth 1 https://github.com/haydenrear/test_graph_skill.git "$TEST_GRAPH_SKILL"
+          test -d "$TEST_GRAPH_SKILL/project_sdk_sources/sdk"
+          test -d "$TEST_GRAPH_SKILL/project_sdk_sources/build-logic"
+
+      - name: Materialize the managed provider bindings
+        run: '"$TEST_GRAPH_SKILL/scripts/prepare-bindings.py" --test-graph-root test_graph'
+
+      # Plan before run, per the skill's own guidance: a composition error is
+      # cheaper to read here than as a Gradle failure inside the run.
+      - name: Plan the graph
+        run: '"$TEST_GRAPH_SKILL/scripts/discover.py" sktSurface --test-graph-root test_graph'
+
+      - name: Run the graph
+        run: '"$TEST_GRAPH_SKILL/scripts/run.py" sktSurface --test-graph-root test_graph'
+
+      # The envelopes and logs, not the fixtures: the fixture tree holds git
+      # clones and worktrees and is the bulk of the run directory, while the
+      # evidence a reader needs is the per-node envelope.
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sktSurface-validation-reports
+          path: |
+            test_graph/build/validation-reports/*/report.md
+            test_graph/build/validation-reports/*/summary.json
+            test_graph/build/validation-reports/*/envelope/
+            test_graph/build/validation-reports/*/node-logs/
+          if-no-files-found: warn
