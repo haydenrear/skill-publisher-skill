@@ -44,12 +44,19 @@ OLDER document is read as far as it goes: `StaleReport` schema 1 carries no
 `materialization`, so those rows report it as ``unknown``, which is what it
 is.
 
-## Timeouts
+## Timeouts — reads are bounded, builds are not
 
-Every call is bounded, and the child runs in its own process group that is
+Every READ is bounded, and the child runs in its own process group that is
 SIGKILLed and reaped on the deadline — the same treatment `check._run_git`
 gives git, for the same reason: the CLI spawns package managers and
 installers that inherit the pipes and outlive a plain `Popen.kill()`.
+
+That same group-kill is why :func:`build` is UNBOUNDED by default. Reaping
+a hung read costs nothing; reaping a running install costs a half-written
+tree where the artifact used to be, so the verb called to repair staleness
+would leave the home worse than it found it. `_run` has no fallback
+default: reads pass :data:`READ_TIMEOUT_SECONDS`, `build` passes
+:data:`BUILD_TIMEOUT_SECONDS` (None), and neither can inherit the other's.
 """
 
 from __future__ import annotations
@@ -70,11 +77,32 @@ LIST_SCHEMA = 1
 STALE_SCHEMA = 2
 BUILD_SCHEMA = 1
 
-#: Default wall budget for one CLI call. The measured per-invocation CLI
-#: floor is ~1.2 s (`evals/artifacts/baseline/cli_floor.json`), so this is
+#: Default wall budget for one READ. The measured per-invocation CLI floor
+#: is ~1.2 s (`evals/artifacts/baseline/cli_floor.json`), so this is
 #: generous for a read and a hard stop for a hang. Callers on a shared
 #: budget — `skt check`'s live path — pass their own remaining time.
-DEFAULT_TIMEOUT_SECONDS = 20.0
+READ_TIMEOUT_SECONDS = 20.0
+
+#: And NOTHING for a build, deliberately.
+#:
+#: `_run` kills the whole process GROUP on a deadline, which is right for a
+#: read (the CLI's children are helpers holding a pipe open) and is damage
+#: on a write: a package install SIGKILLed partway through leaves a
+#: half-installed tree behind, and the artifact this verb was called to
+#: repair is then worse than it was. A read budget on a write operation is
+#: how a remedy becomes the incident.
+#:
+#: An install has no defensible upper bound anyway — the wheelhouse this
+#: repo's own `skill-script/tracing-observability` builds takes longer than
+#: any number that could be written here. `build` is an explicit,
+#: foreground, operator-initiated command; it is not on the hook path and
+#: nothing behind it is waiting on a deadline. A caller that DOES have one
+#: can still pass `timeout=`.
+BUILD_TIMEOUT_SECONDS: float | None = None
+
+#: Kept as the old spelling of the read budget: it was only ever reached by
+#: reads, and naming it "default" is what let a write inherit it.
+DEFAULT_TIMEOUT_SECONDS = READ_TIMEOUT_SECONDS
 
 #: The one kind `skill-manager build` has a per-artifact producer for
 #: (`ArtifactBuild`: "Exactly one kind is buildable here: CLI_SHIM").
@@ -401,16 +429,23 @@ def _cli_path(home: Path) -> Path:
 
 
 def _run(home: Path, argv: list[str], timeout: float | None) -> subprocess.CompletedProcess:
-    """One bounded call into the home's pinned CLI. Kills the whole group.
+    """One call into the home's pinned CLI, bounded when a budget is given.
 
     `subprocess.run(timeout=)` kills only the direct child, and this CLI
     spawns brew/npm/pip/uv children that inherit the pipes and keep the
     caller open past its budget — `check._run_git` carries the same note
     about git's helpers. Own session + killpg reaps the lot.
+
+    `timeout=None` means UNBOUNDED, and there is no fallback default here:
+    the same group-kill that correctly reaps a hung read would tear a
+    half-finished install apart, so which calls carry a deadline is a
+    decision each caller makes explicitly. Reads pass
+    :data:`READ_TIMEOUT_SECONDS`; :func:`build` passes
+    :data:`BUILD_TIMEOUT_SECONDS`, which is None.
     """
     cli = _cli_path(home)
-    budget = DEFAULT_TIMEOUT_SECONDS if timeout is None else float(timeout)
-    if budget <= 0:
+    budget = None if timeout is None else float(timeout)
+    if budget is not None and budget <= 0:
         raise ProbeTimeout(
             f"no time left in this pass to ask {cli.name} about artifacts",
             fix="skt check   # an explicit refresh has the whole budget",
@@ -473,7 +508,11 @@ def _classify(proc: subprocess.CompletedProcess, argv: list[str]) -> ArtifactErr
             exit_code=_EXIT_NOT_A_HOME,
             detail=tail,
         )
-    if proc.returncode == _EXIT_FROZEN or "frozen" in low:
+    # Exit code ONLY. `"frozen" in stderr` also matches every CPython
+    # traceback, which contains `<frozen importlib._bootstrap>` — and it was
+    # tested ahead of the unsupported-verb markers, so an interpreter error
+    # would have been reported as a policy refusal.
+    if proc.returncode == _EXIT_FROZEN:
         return BuildRefused(
             "this home's policy is `frozen` — a rebuild would rewrite what was frozen",
             fix="skill-manager home policy --live   # then re-run",
@@ -552,7 +591,8 @@ def list_artifacts(
         argv += ["--kind", kind]
     if owner:
         argv += ["--owner", owner]
-    data = _decode(_run(home, argv, timeout), argv, LIST_SCHEMA)
+    budget = READ_TIMEOUT_SECONDS if timeout is None else timeout
+    data = _decode(_run(home, argv, budget), argv, LIST_SCHEMA)
     return tuple(_artifact(row) for row in data.get("artifacts") or [])
 
 
@@ -592,7 +632,8 @@ def stale(
     argv = ["artifacts", "stale", "--json"]
     if kind:
         argv += ["--kind", kind]
-    data = _decode(_run(home, argv, timeout), argv, STALE_SCHEMA)
+    budget = READ_TIMEOUT_SECONDS if timeout is None else timeout
+    data = _decode(_run(home, argv, budget), argv, STALE_SCHEMA)
     summary = data.get("summary") or {}
     return StaleSurvey(
         home=data.get("home") or str(home),
@@ -628,13 +669,20 @@ def build(
     force: bool = False,
     yes: bool = False,
     home: Path | None = None,
-    timeout: float | None = None,
+    timeout: float | None = BUILD_TIMEOUT_SECONDS,
 ) -> BuildResult:
     """Rebuild named artifacts, everything stale, or everything buildable.
 
     With no ids and no flags this is `build --stale`, which is the CLI's own
     default. Ids are passed through verbatim — resolve a short name with
     :func:`resolve_ids` first if that is what you hold.
+
+    UNBOUNDED by default, and that is the point: this runs a real install
+    through a real backend, and `_run` kills the whole process group on a
+    deadline. A `pip`/`brew`/wheelhouse build cut off partway leaves a
+    half-installed tree where the artifact used to be — the remedy doing
+    more damage than the staleness it was called to fix. Pass `timeout=` to
+    take a bound deliberately.
     """
     home = home or resolve_home(start)
     argv = ["build"]
@@ -650,8 +698,7 @@ def build(
         argv.append("--yes")
     argv.append("--json")
     argv += list(ids)
-    # A build can install: it gets the default budget unless a caller with a
-    # deadline says otherwise, and never the caller's leftover milliseconds.
+    # No fallback to a read budget here — see BUILD_TIMEOUT_SECONDS.
     proc = _run(home, argv, timeout)
     data = _decode(proc, argv, BUILD_SCHEMA)
     summary = data.get("summary") or {}
@@ -745,12 +792,21 @@ def resolve_ids(
         if len(buildable) == 1:
             out.append(buildable[0].id)
             continue
-        ids = tuple(a.id for a in (buildable or matches))
+        if buildable:
+            ids = tuple(a.id for a in buildable)
+            raise UnknownArtifact(
+                f"{token!r} names {len(ids)} buildable artifacts in this home",
+                fix=f"skt build {ids[0]}   # name the id you meant",
+                candidates=ids[:8],
+            )
+        # Every candidate is a kind `build` has no producer for, so the fix
+        # must NOT be `skt build <one of them>`: that command would refuse
+        # in its turn. Same defect the ambiguity fix above removed, one
+        # branch along.
+        ids = tuple(a.id for a in matches)
         raise UnknownArtifact(
-            f"{token!r} names {len(ids)} buildable artifacts in this home"
-            if buildable
-            else f"{token!r} names {len(ids)} artifacts in this home, none of them buildable",
-            fix=f"skt build {ids[0]}   # name the id you meant",
+            f"{token!r} names {len(ids)} artifacts in this home, none of them buildable",
+            fix=f"skill-manager artifacts show {ids[0]}   # names what does rebuild it",
             candidates=ids[:8],
         )
     return tuple(out)

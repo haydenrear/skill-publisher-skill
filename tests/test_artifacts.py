@@ -411,7 +411,65 @@ def test_an_unclassifiable_failure_is_still_typed(tmp_path):
     assert "boom" in err.value.detail
 
 
+def test_a_traceback_is_not_mistaken_for_a_frozen_home(tmp_path):
+    """`"frozen" in stderr` matched every CPython traceback.
+
+    Every one of them contains `<frozen importlib._bootstrap>`, and the
+    substring was tested AHEAD of the unsupported-verb markers — so an
+    interpreter error was reported as a policy refusal with a
+    `home policy --live` remedy that would not have helped. A frozen home
+    exits 9 and that is the whole test.
+    """
+    trace = (
+        "Traceback (most recent call last):\n"
+        '  File "<frozen importlib._bootstrap>", line 1007, in _find_and_load\n'
+        "ModuleNotFoundError: No module named 'x'\n"
+    )
+    home = home_with(tmp_path, stderr=trace, exit_code=1)
+    with pytest.raises(art.ArtifactError) as err:
+        art.stale(home=home)
+    assert not isinstance(err.value, art.BuildRefused)
+    # And a real frozen refusal is still one.
+    other = home_with(tmp_path / "b", stderr="error: home policy is frozen\n", exit_code=9)
+    with pytest.raises(art.BuildRefused):
+        art.build(home=other)
+
+
 # ------------------------------------------------------- process discipline
+
+
+def test_a_build_is_not_killed_by_the_read_budget(tmp_path, monkeypatch):
+    """A read budget on a write is how a remedy becomes the incident.
+
+    `build` runs a real install through a real backend, and `_run` kills the
+    whole process GROUP on a deadline — so a producer cut off partway leaves
+    a half-installed tree where the artifact used to be. Here the read
+    budget is squeezed to 0.3 s and the producer takes 2 s: the read dies,
+    the build survives.
+    """
+    monkeypatch.setattr(art, "READ_TIMEOUT_SECONDS", 0.3)
+    home = home_with(tmp_path, stdout=json.dumps(BUILD_DOC), sleep=2)
+    with pytest.raises(art.ProbeTimeout):
+        art.stale(home=home)
+    result = art.build(home=home)  # same CLI, same 2s, and it must finish
+    assert result.rebuilt == 1
+
+
+def test_build_still_takes_a_deadline_when_one_is_asked_for(tmp_path):
+    """Unbounded is the DEFAULT, not the only option."""
+    home = home_with(tmp_path, stdout=json.dumps(BUILD_DOC), sleep=30)
+    started = time.monotonic()
+    with pytest.raises(art.ProbeTimeout):
+        art.build(home=home, timeout=1.0)
+    assert time.monotonic() - started < 10
+
+
+def test_the_build_budget_is_declared_unbounded():
+    """The constant IS the contract; a number here reintroduces the defect."""
+    import inspect
+
+    assert art.BUILD_TIMEOUT_SECONDS is None
+    assert inspect.signature(art.build).parameters["timeout"].default is None
 
 
 def test_a_hung_cli_times_out_and_the_whole_group_dies(tmp_path):
@@ -523,6 +581,10 @@ def test_a_name_shared_by_nothing_buildable_is_still_refused(tmp_path):
     with pytest.raises(art.UnknownArtifact) as err:
         art.resolve_ids(["x"], home=home)
     assert "none of them buildable" in err.value.reason
+    # And the fix must not be `skt build <one of them>` — that command would
+    # refuse in its turn, which is the defect this branch nearly repeated.
+    assert not err.value.fix.startswith("skt build")
+    assert "artifacts show" in err.value.fix
 
 
 def test_an_ambiguous_short_name_is_refused_not_guessed(tmp_path):
