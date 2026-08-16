@@ -1,15 +1,60 @@
-"""`skt status` — the startup report. Local disk only; no network."""
+"""`skt status` — the startup report. Local disk only; no network.
+
+The artifact dimension here is READ BACK, never measured. `skt check`'s
+live path is the one place that spawns the CLI, and this command runs
+first in the SessionStart hook and on every orientation request — so
+measuring here would put a second process spawn in front of every
+session for a number the next line of the same hook is about to
+produce. What it prints is the counts `skt check` recorded, with their
+age attached so a reader can see how old they are.
+"""
 
 from __future__ import annotations
 
 import json
+import shlex
+import time
 from pathlib import Path
 
 from . import context as ctx_mod
 from . import homes
 
-SCHEMA_VERSION = 1
+# 2: the report gained `artifacts`, read back from the check record.
+SCHEMA_VERSION = 2
 MAX_TEXT_UNITS = 15
+# `MAX_TEXT_UNITS`' rule applied to the new dimension: the startup report is
+# injected into every session, so the artifact line names a few and counts
+# the rest.
+MAX_TEXT_ARTIFACTS = 4
+
+
+def read_artifact_counts(home: Path) -> dict | None:
+    """The `artifacts` block `skt check` last recorded, or None.
+
+    One file read and no subprocess — the same file `check --cached`
+    serves from, read the same way. Deliberately NOT gated on the record's
+    TTL: an artifact count that is fifteen minutes old is still a count,
+    and the age goes on the line so nobody has to assume otherwise.
+    """
+    try:
+        raw = json.loads((home / "cache" / "skt-check.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    block = raw.get("artifacts")
+    if not isinstance(block, dict):
+        return None  # a record written before ARTI-10 has no artifact half
+    block = dict(block)
+    block["measured_at"] = raw.get("checked_at")
+    block["age_seconds"] = max(0, int(time.time() - (raw.get("checked_at") or 0)))
+    return block
+
+
+def _age(seconds: int) -> str:
+    if seconds < 90:
+        return f"{seconds}s ago"
+    if seconds < 5400:
+        return f"{seconds // 60}m ago"
+    return f"{seconds // 3600}h ago"
 
 
 def collect(start: str | Path = ".") -> dict:
@@ -27,6 +72,7 @@ def collect(start: str | Path = ".") -> dict:
         "schema": SCHEMA_VERSION,
         "home": str(home),
         "tier": tctx.tier,
+        "artifacts": read_artifact_counts(home),
         "policy": homes.read_policy(home),
         "drift_pending": homes.drift_pending(home),
         "checkout": {
@@ -68,6 +114,52 @@ def collect(start: str | Path = ".") -> dict:
         ],
         "plugins": homes.read_plugins(home),
     }
+
+
+def _artifact_lines(block: dict | None) -> list[str]:
+    """At most two lines, and only when there is something to act on.
+
+    The counts separate the two things a home can mean by "stale", because
+    they call for different actions and only one of them is news:
+
+      rebuildable  on disk and no longer describing its inputs — the
+                   `skt build` case, and the one worth a session's
+                   attention;
+      not built    declared and never materialized, which is a lazily
+                   provisioned home working as designed.
+
+    A home that has never run `skt check` prints nothing here rather than
+    a placeholder: the same hook runs `skt check` two lines later, which
+    is where the absence is fixed and reported.
+    """
+    if not block:
+        return []
+    state = block.get("state")
+    if state != "ok":
+        if state in (None, "off", "no-cli"):
+            return []
+        return [f"artifacts  not measured ({state}): {block.get('reason', '')}"]
+    stale = block.get("stale") or 0
+    if not stale:
+        return [
+            f"artifacts  {block.get('total', 0)} derived, none stale "
+            f"(measured {_age(block.get('age_seconds', 0))})"
+        ]
+    line = (
+        f"artifacts  {stale} stale of {block.get('total', 0)} — "
+        f"{block.get('rebuildable', 0)} rebuildable, "
+        f"{block.get('not_built', 0)} declared-not-built, "
+        f"{block.get('unverifiable', 0)} unverifiable "
+        f"(measured {_age(block.get('age_seconds', 0))})"
+    )
+    lines = [line]
+    if block.get("rebuildable"):
+        names = [shlex.quote(row.get("name", "?")) for row in (block.get("rows") or [])]
+        shown = ", ".join(names[:MAX_TEXT_ARTIFACTS])
+        if len(names) > MAX_TEXT_ARTIFACTS:
+            shown += f" +{len(names) - MAX_TEXT_ARTIFACTS} more"
+        lines.append(f"           rebuild with: skt build --stale   ({shown})")
+    return lines
 
 
 def render_text(report: dict) -> str:
@@ -133,6 +225,7 @@ def render_text(report: dict) -> str:
         )
     if len(units) > MAX_TEXT_UNITS:
         lines.append(f"  … +{len(units) - MAX_TEXT_UNITS} more (skt status --json for all)")
+    lines += _artifact_lines(report.get("artifacts"))
     plugins = report["plugins"]
     lines.append(f"plugins    {', '.join(plugins) if plugins else 'none'}")
     lines.append("next       skt check — new-version and sync notifications")

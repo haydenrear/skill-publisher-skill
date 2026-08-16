@@ -153,7 +153,12 @@ def test_text_render_is_bounded(tmp_path):
 def test_json_schema_versioned(tmp_path):
     repo = make_repo(tmp_path / "repo")
     make_home(repo, units={"alpha": {}})
-    assert status.collect(repo)["schema"] == 1
+    report = status.collect(repo)
+    # The number tracks the constant rather than a literal, so a bump is
+    # one edit in the module the constant describes — but the report must
+    # CARRY it, which is what this asserts.
+    assert report["schema"] == status.SCHEMA_VERSION
+    assert isinstance(report["schema"], int)
 
 
 def test_cli_status_runs_as_script(tmp_path):
