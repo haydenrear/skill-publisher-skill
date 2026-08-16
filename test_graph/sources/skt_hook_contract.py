@@ -104,6 +104,21 @@ def _cache(home: Path, *, checked_at: float, notifications: list[dict]) -> None:
     )
 
 
+def _hook_output(emitted: str) -> dict:
+    """The hook's `hookSpecificOutput` block, or {} if it emitted no such thing.
+
+    Total, so the assertion above it can be unconditional: garbage on stdout
+    and no stdout at all both become an empty block, which fails the assertion
+    rather than raising out of the node.
+    """
+    try:
+        payload = json.loads(emitted)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    block = payload.get("hookSpecificOutput") if isinstance(payload, dict) else None
+    return block if isinstance(block, dict) else {}
+
+
 def _log_lines(home: Path) -> list[str]:
     log = home / "logs" / "skt" / "hook.log"
     if not log.is_file():
@@ -220,24 +235,32 @@ def main(ctx):
         tool_env = child_env(SKILL_MANAGER_HOME=str(tool_home), CLAUDE_SESSION_ID="sess-tool")
 
         emissions = []
-        for _ in range(5):
+        for call in range(1, 6):
             run = _run_hook(POST_TOOL_HOOK, cwd=repo, env=tool_env)
             invocations += 1
-            result.assertion(f"{version}: PostToolUse exits zero", run.returncode == 0)
+            # NUMBERED. Five assertions sharing one name make a failure among
+            # them unlocatable from the envelope, and "the third tool call
+            # exited non-zero" is a different defect from "the first did".
+            result.assertion(
+                f"{version}: PostToolUse exits zero (tool call {call}/5)",
+                run.returncode == 0,
+            )
             if run.stdout.strip():
                 emissions.append(run.stdout.strip())
         result.assertion(
             f"{version}: five tool calls over one check result inject exactly once",
             len(emissions) == 1,
         )
-        if emissions:
-            payload = json.loads(emissions[0])
-            hook_out = payload.get("hookSpecificOutput", {})
-            result.assertion(
-                f"{version}: the injection is a PostToolUse additionalContext block",
-                hook_out.get("hookEventName") == "PostToolUse"
-                and NOTIFICATION["message"] in hook_out.get("additionalContext", ""),
-            )
+        # UNCONDITIONAL, so this node emits the same assertion SET whether it
+        # passes or fails. Guarding it on `emissions` would make the count an
+        # outcome, and a reader diffing two runs could not then tell a claim
+        # that was skipped from one that was deleted.
+        hook_out = _hook_output(emissions[0]) if emissions else {}
+        result.assertion(
+            f"{version}: the injection is a PostToolUse additionalContext block",
+            hook_out.get("hookEventName") == "PostToolUse"
+            and NOTIFICATION["message"] in hook_out.get("additionalContext", ""),
+        )
         result.assertion(
             f"{version}: and appends exactly one post-tool line",
             len([line for line in _log_lines(tool_home) if POST_LINE.match(line)]) == 1,

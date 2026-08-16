@@ -53,8 +53,16 @@ SPEC = (
 )
 
 # scenario -> (exit code, cache_state, state-file reads)
+#
+# `no-home` carries None for the read count ON PURPOSE. With no home there is
+# no state file, so the probe has no path to compare opens against and
+# `state_file_reads` is 0 by construction — an assertion on it could not fail,
+# and a claim that cannot fail is padding. What carries the weight in that
+# scenario is `opens no other file`, which for a home-less run is EVERY open
+# the code performed: `find_home` walks its ancestors with stat() and must open
+# nothing at all. That one can fail, and would if the walk ever read a file.
 EXPECTED = {
-    "no-home": (1, None, 0),
+    "no-home": (1, None, None),
     "missing": (0, "missing", 1),
     "corrupt": (0, "missing", 1),
     "expired": (0, "expired", 1),
@@ -129,10 +137,11 @@ def main(ctx):
                 )
             # THE CLAIM.
             result.assertion(f"{label}: spawns nothing", record_["spawns"] == [])
-            result.assertion(
-                f"{label}: reads the state file exactly {reads} time(s)",
-                record_["state_file_reads"] == reads,
-            )
+            if reads is not None:
+                result.assertion(
+                    f"{label}: reads the state file exactly {reads} time(s)",
+                    record_["state_file_reads"] == reads,
+                )
             result.assertion(f"{label}: opens no other file", record_["other_opens"] == [])
             result.assertion(f"{label}: writes nothing back", record_["cache_unchanged"] is True)
 

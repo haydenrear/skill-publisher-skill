@@ -47,10 +47,22 @@ plugins {
  *       refusal remedies, each of which must name a command that runs in the
  *       home it is printed for (#25).
  *
- * Every node reaches skt through the wrapper `skt.wrapper-installed` built,
- * never through an import. A graph that imported `skt.cli` would be a slower
- * copy of the pytest suite, which is the degenerate outcome test-graph exists
- * to prevent.
+ * FOUR OF THE FIVE nodes reach skt only through the wrapper
+ * `skt.wrapper-installed` built — as a subprocess, never as an import. A graph
+ * that imported `skt.cli` would be a slower copy of the pytest suite, which is
+ * the degenerate outcome test-graph exists to prevent.
+ *
+ * skt.check-cached-costs-one-read is the ONE exception, and it has to be. Its
+ * claim is "this code path creates no process and opens exactly one file", and
+ * the two instruments that can establish that — `sys.addaudithook` and a
+ * poisoned subprocess / os.spawn / fork / ThreadPoolExecutor surface — exist
+ * only INSIDE the interpreter running the code. Measured from outside, all a
+ * subprocess offers is its wall time, and wall time is exactly the evidence
+ * that passes on an idle laptop and fails on a loaded runner while measuring
+ * neither the spawn nor the read. So `support/cached_no_spawn_probe.py`
+ * imports `skt.check` on the pinned interpreter and drives it in-process, and
+ * the node's own docstring says so. It is a different KIND of evidence from
+ * the other four, not a cheaper version of it.
  *
  * DEPENDENCIES are declared at SCRIPT level (`NodeSpec.depends_on`), so each
  * assertion node still stands on its own outside this graph. What gates in
