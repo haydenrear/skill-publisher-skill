@@ -11,7 +11,7 @@ skill edit survive this worktree?*
 
 ```bash
 skt status            # startup report: units, plugins, home tier, epic/ticket state
-skt check             # new-version-available + (root home only) sync-with-root prompts
+skt check             # new-version-available, recorded unit errors, stale artifacts
 skt sync <unit>       # pull a unit to its latest pushed source
 skt ticket new <T>    # ticket worktree + its own Skill Manager home, one command
 skt ticket close <T>  # teardown through the close-out gate
@@ -20,6 +20,30 @@ skt publish [<unit>]  # a home-edited skill -> up one tier -> its own git repo
 
 `skt` is on `PATH` in every skill-manager home (`<home>/bin/cli/skt`).
 `skt --help` is authoritative for syntax.
+
+## When `skt check` says a unit is NOT stale
+
+A unit whose installed hash disagrees with its remote tip is usually
+behind it. Sometimes the home already knows better: the installer
+records `errors[*].kind` when it leaves a store in a state it could not
+finish, and for `MERGE_CONFLICT`, `NO_GIT_REMOTE` and
+`NEEDS_GIT_MIGRATION` that record *is* the explanation for the
+disagreement. `skt check` reads it first and emits a `unit-error`
+notification in place of the pull prompt:
+
+```
+deploy-helm is not stale — its store is mid-merge (MERGE_CONFLICT):
+unmerged paths remain. Local work is preserved at stash@{0}.
+Syncing re-runs the merge that made them.
+  resolve with: git -C <home>/skills/deploy-helm status
+```
+
+**Do not answer this with `skt sync` or `skill-manager sync --merge`.**
+`--merge` is documented as the flag that *sets* `MERGE_CONFLICT`, and
+the state clears only when the store has no unmerged files left. The
+stash the message names is somebody's uncommitted work and any reset of
+the store destroys it. Resolve in the store directory, `git add` +
+`git commit`, and the next command clears the error by itself.
 
 ## Startup disclosure
 

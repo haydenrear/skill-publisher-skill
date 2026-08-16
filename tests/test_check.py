@@ -314,3 +314,162 @@ def test_unpushed_work_on_top_of_a_fetched_tip_still_reports_ahead(tmp_path, mon
     note = next(n for n in report["notifications"] if n["kind"] == "sync-with-root")
     assert note["state"] == "ahead"
     assert report["upstream_stale"] == []
+
+
+# --- ARTI-23: a unit whose store records an error is not "stale" ---------
+#
+# The home is honest and the reader was not. `errors[0].kind` is recorded by
+# the installer, parsed by `homes.py`, marked by `status.py` — and `check.py`
+# contained zero occurrences of `errors`, so a mid-merge store was framed as
+# routine staleness whose remedy is the one action that re-enters the merge.
+
+
+def conflicted_store(home: Path, bare: Path, name: str, base: Path) -> tuple[Path, str]:
+    """A store checkout with real unmerged paths and a retained stash.
+
+    Reproduces the shape the operator's project home actually holds:
+    `skill-manager sync` stashed local work as `skill-manager-sync`,
+    merged the upstream, and the stash pop conflicted — leaving `UU`
+    files and `stash@{0}` still on the stack. HEAD is a local commit that
+    does NOT contain the new remote tip, which is the `deploy-helm` /
+    `spec-double-compiler` case: the check would otherwise emit
+    `new version available — pull with: skt sync`.
+    """
+    unit_dir = home / "skills" / name
+    subprocess.run(["git", "clone", "-q", str(bare), str(unit_dir)], check=True)
+    (unit_dir / "SKILL.md").write_text("# local divergence\n")
+    subprocess.run([*GIT, "-C", str(unit_dir), "add", "-A"], check=True)
+    subprocess.run([*GIT, "-C", str(unit_dir), "commit", "-q", "-m", "local"], check=True)
+    (unit_dir / "SKILL.md").write_text("# uncommitted work somebody cares about\n")
+    subprocess.run(
+        [*GIT, "-C", str(unit_dir), "stash", "push", "-q", "-m", "skill-manager-sync"],
+        check=True,
+    )
+    new_tip = advance_upstream(bare, base)
+    subprocess.run(
+        ["git", "-C", str(unit_dir), "fetch", "--no-tags", "--quiet", str(bare), "main"],
+        check=True,
+    )
+    merged = subprocess.run(
+        [*GIT, "-C", str(unit_dir), "merge", "--no-edit", "FETCH_HEAD"], capture_output=True
+    )
+    assert merged.returncode != 0, "the fixture must actually conflict"
+    unmerged = subprocess.run(
+        ["git", "-C", str(unit_dir), "diff", "--name-only", "--diff-filter=U"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert unmerged, "the fixture must leave unmerged paths"
+    stash = subprocess.run(
+        ["git", "-C", str(unit_dir), "stash", "list"], capture_output=True, text=True, check=True
+    ).stdout
+    assert "skill-manager-sync" in stash, "the fixture must preserve the stash"
+    return unit_dir, new_tip
+
+
+MERGE_CONFLICT_ERROR = {
+    "kind": "MERGE_CONFLICT",
+    "message": (
+        "stash pop conflict after merging https://github.com/x/alpha main "
+        "— local changes preserved at stash@{0}"
+    ),
+    "firstSeenAt": "2026-08-11T22:24:13.710799Z",
+}
+
+
+def test_merge_conflict_unit_is_never_told_to_sync(tmp_path):
+    """The reported defect, driven as a SEQUENCE.
+
+    A unit records MERGE_CONFLICT, its store holds unmerged paths and a
+    preserved stash, and its recorded gitHash disagrees with the live
+    remote tip. The emitted notification must not be a sync instruction:
+    `skt sync` re-runs the merge that produced the conflict and is the
+    one action that puts the stashed work at risk.
+    """
+    repo = make_repo(tmp_path / "repo")
+    bare, tip = make_unit_upstream(tmp_path, "alpha")
+    home = make_home(
+        repo, units={"alpha": {**unit_record(bare, tip), "errors": [MERGE_CONFLICT_ERROR]}}
+    )
+    unit_dir, new_tip = conflicted_store(home, bare, "alpha", tmp_path)
+    assert new_tip != tip  # the record really is behind the live tip
+
+    report = check_mod.collect(repo, probe_artifacts=False)
+    assert all(n["kind"] != "new-version" for n in report["notifications"]), report
+    note = next(n for n in report["notifications"] if n["kind"] == "unit-error")
+    assert note["unit"] == "alpha"
+    assert note["state"] == "MERGE_CONFLICT"
+    text = check_mod.render_text(report)
+    assert "skt sync alpha" not in text, text
+    assert "MERGE_CONFLICT" in text
+    assert str(unit_dir) in text  # the remedy names the store to resolve IN
+    assert "stash@{0}" in text  # ...and the work that must not be lost
+
+
+def test_merge_conflict_unit_at_the_tip_is_named_not_called_ahead(tmp_path):
+    """`hyper-experiments-finance`: store AT the tip, record behind it.
+
+    Ancestry (ARTI-10) already keeps this out of `new-version`, but it
+    lands in `ahead_of_remote` — "ahead of the remote tip (nothing to
+    pull)" — which is true about the hashes and silent about the fact
+    that the store cannot be synced at all until someone resolves it.
+    """
+    repo = make_repo(tmp_path / "repo")
+    bare, tip = make_unit_upstream(tmp_path, "alpha")
+    home = make_home(
+        repo, units={"alpha": {**unit_record(bare, tip), "errors": [MERGE_CONFLICT_ERROR]}}
+    )
+    unit_dir = home / "skills" / "alpha"
+    subprocess.run(["git", "clone", "-q", str(bare), str(unit_dir)], check=True)
+    (unit_dir / "SKILL.md").write_text("# conflicted\n")
+    subprocess.run([*GIT, "-C", str(unit_dir), "add", "-A"], check=True)
+    subprocess.run([*GIT, "-C", str(unit_dir), "commit", "-q", "-m", "past the tip"], check=True)
+
+    report = check_mod.collect(repo, probe_artifacts=False)
+    assert report["ahead_of_remote"] == [], report
+    assert any(n["kind"] == "unit-error" for n in report["notifications"]), report
+
+
+def test_merge_conflict_store_is_never_told_to_publish(tmp_path, monkeypatch):
+    """The same unread field, on the push side.
+
+    A conflicted store is `dirty` to `git status --porcelain`, so the
+    root tier prompted `skt publish` — publishing a half-merged tree.
+    """
+    fake_root = tmp_path / "fake-root"
+    repo = make_repo(fake_root / "anywhere")
+    bare, tip = make_unit_upstream(tmp_path, "alpha")
+    home = make_home(
+        fake_root, units={"alpha": {**unit_record(bare, tip), "errors": [MERGE_CONFLICT_ERROR]}}
+    )
+    conflicted_store(home, bare, "alpha", tmp_path)
+    monkeypatch.setenv("SKILL_MANAGER_HOME", str(home))
+
+    report = check_mod.collect(repo, probe_artifacts=False)
+    assert all(n["kind"] != "sync-with-root" for n in report["notifications"]), report
+    assert "skt publish alpha" not in check_mod.render_text(report)
+
+
+def test_an_error_that_says_nothing_about_the_store_keeps_its_new_version(tmp_path):
+    """The guard: only errors about the STORE CHECKOUT suppress a pull.
+
+    `GATEWAY_UNAVAILABLE` is a record about MCP registration. The store
+    is fine, the pull advice is correct, and suppressing it would trade
+    one wrong message for a missing right one.
+    """
+    repo = make_repo(tmp_path / "repo")
+    bare, tip = make_unit_upstream(tmp_path, "alpha")
+    make_home(
+        repo,
+        units={
+            "alpha": {
+                **unit_record(bare, tip),
+                "errors": [{"kind": "GATEWAY_UNAVAILABLE", "message": "gateway did not respond"}],
+            }
+        },
+    )
+    new_tip = advance_upstream(bare, tmp_path)
+
+    report = check_mod.collect(repo, probe_artifacts=False)
+    note = next(n for n in report["notifications"] if n["kind"] == "new-version")
+    assert note["remote"] == new_tip[:8]
+    assert "skt sync alpha" in note["message"]

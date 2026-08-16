@@ -19,11 +19,31 @@ class Unit:
     git_ref: str | None
     loaded: bool
     errors: list[str]
+    # The SAME errors, unflattened. `errors` is rendered text — `status.py`
+    # prints it and marks `[ERRORS]` from its truthiness — and `str(dict)`
+    # is a one-way door: the installer records `{"kind": ..., "message":
+    # ...}` and every reader that wants to ACT on a recorded state needs
+    # the kind back. `check.py` contained zero occurrences of `errors`
+    # precisely because the only shape on offer was prose. Additive and
+    # defaulted, so nothing that builds a Unit positionally has to change.
+    error_records: tuple[dict, ...] = ()
 
     @property
     def change_managed(self) -> bool:
         """Git provenance present — the unit can round-trip to its own repo."""
         return bool(self.origin and self.git_hash)
+
+    def error(self, *kinds: str) -> dict | None:
+        """The first recorded error whose `kind` is one of `kinds`, or None.
+
+        Order is the record's own: the installer appends, so `errors[0]`
+        is the oldest unresolved state and the one the operator has been
+        living with.
+        """
+        for record in self.error_records:
+            if record.get("kind") in kinds:
+                return record
+        return None
 
 
 def find_home(start: str | Path = ".") -> Path | None:
@@ -76,6 +96,10 @@ def read_units(home: Path) -> list[Unit]:
                 git_ref=data.get("gitRef"),
                 loaded=(installed / f"{record.stem}.projections.json").is_file(),
                 errors=[str(e) for e in errors],
+                error_records=tuple(
+                    e if isinstance(e, dict) else {"kind": "UNKNOWN", "message": str(e)}
+                    for e in errors
+                ),
             )
         )
     return units

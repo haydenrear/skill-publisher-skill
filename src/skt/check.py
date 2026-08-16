@@ -1,10 +1,28 @@
-"""`skt check` — new-version, sync-with-root and stale-artifact notifications.
+"""`skt check` — new-version, sync-with-root, unit-error and stale-artifact.
 
 Pull-side (every tier): compare each change-managed unit's installed
 gitHash against its remote tip (`git ls-remote`). Push-side (ROOT tier
 only): a unit's store checkout that is dirty or ahead of its remote is
 work nobody else can see — prompt the publish. Project homes are
 updated from `wt`-created imports, so they get pull-side messages only.
+
+Both of those are inferences from hashes, and the home does not only
+carry hashes: the installer records `errors[*].kind` when it leaves a
+store in a state it could not finish. For the three kinds that describe
+the STORE CHECKOUT itself (`STORE_BLOCKING_ERRORS`), that record is the
+explanation for the disagreement the hash comparison would otherwise
+diagnose on its own — so it is read FIRST, and it replaces both
+verdicts rather than riding beside them.
+
+The case this exists for, measured in the operator's project home:
+three units record `MERGE_CONFLICT` with `stash@{0}` holding somebody's
+uncommitted work, and `skt check` answered two of them with "new
+version available — pull with: skt sync", which re-runs the merge that
+made the conflict, and the third with "ahead of the remote tip", which
+is true about hashes and silent about the unmerged paths. The remedy a
+`unit-error` names is the one skill-manager's own `ReportUseCase.hint`
+names — resolve in the store — never a skill-manager verb, because
+`sync --merge` is documented as what SETS this state.
 
 Artifact-side (every tier): a unit moving is only half the news. The
 half that unblocks a fast fix is WHICH derived artifact went stale as a
@@ -100,7 +118,12 @@ from . import homes
 # `stale-artifact`. Additive on the same terms: an older record has no
 # `artifacts` key, `skt status` reads it with `.get`, and a reader that
 # does not know the kind still gets a `message`.
-SCHEMA_VERSION = 3
+# 4: notifications of kind `unit-error` (ARTI-23). Additive again — the
+# kind carries `message` and `fix` like `stale-artifact` does — but a
+# consumer filtering on `kind == "new-version"` sees FEWER rows than a v3
+# record would have shown for the same home, because a store-blocking
+# error now replaces that unit's pull prompt rather than riding beside it.
+SCHEMA_VERSION = 4
 DEFAULT_TTL_SECONDS = 900
 NOTIFY_EXIT = 10
 REMOTE_TIMEOUT_SECONDS = 10
@@ -133,6 +156,26 @@ MAX_ARTIFACT_NOTIFICATIONS = 3
 # set; the default here is on in every session, and the switch exists only
 # so an operator who has measured a reason can turn one probe off.
 ARTIFACTS_ENV = "SKT_ARTIFACTS"
+
+# Recorded `errors[*].kind` values that describe the STORE CHECKOUT's own
+# git state — the three whose remedy in skill-manager's own
+# `ReportUseCase.hint` is an action IN the store directory rather than a
+# retry of the command that failed. For these, "installed hash != remote
+# tip" has a recorded explanation and a pull is not the reading:
+#
+#   MERGE_CONFLICT       unmerged paths in the store; sync set this state
+#                        and clears it only when they are gone
+#   NO_GIT_REMOTE        git-tracked, no origin — sync has nothing to fetch
+#   NEEDS_GIT_MIGRATION  no .git in the store at all — sync cannot run
+#
+# Everything else stays out on purpose. GATEWAY_UNAVAILABLE,
+# MCP_REGISTRATION_FAILED, REGISTRY_UNAVAILABLE, AGENT_SYNC_FAILED,
+# HARNESS_CLI_UNAVAILABLE and AUTHENTICATION_NEEDED are records about
+# registration, projection or credentials; the store is fine and the pull
+# advice is correct, so suppressing it would trade a wrong message for a
+# missing right one. A kind this file has never heard of is likewise NOT
+# blocking: an unknown state must not silently swallow a true notification.
+STORE_BLOCKING_ERRORS = ("MERGE_CONFLICT", "NO_GIT_REMOTE", "NEEDS_GIT_MIGRATION")
 
 
 def _run_git(argv: list[str], timeout: float) -> subprocess.CompletedProcess | None:
@@ -338,6 +381,72 @@ def _artifact_state(home: Path, deadline: float) -> dict:
     }
 
 
+def _blocking_error(unit: homes.Unit, store: Path | None) -> dict | None:
+    """A `unit-error` notification, or None if nothing recorded blocks the store.
+
+    Reads the record, spawns nothing: this is the field the home has been
+    writing all along and the reason the hash comparison disagrees.
+
+    The remedy is deliberately NOT a skill-manager verb. Three facts from
+    skill-manager's own source decide it for MERGE_CONFLICT:
+
+      * `SyncCommand --merge`'s help says conflicts "leave the working
+        tree in conflicted state and set MERGE_CONFLICT until resolved" —
+        so `--merge` is what PRODUCES this state, not what clears it;
+      * `LiveInterpreter` clears the error exactly when
+        `GitOps.unmergedFiles(dir).isEmpty()` — the state is a fact about
+        the store's working tree, and only resolving it there changes it;
+      * `ReportUseCase.hint(MERGE_CONFLICT, ...)` already answers
+        "resolve in <storeDir>, then `git add` + `git commit`".
+
+    So `skt check` says what skill-manager already says, in the surface an
+    agent actually reads, and adds the one thing the hint does not carry:
+    the stash. The recorded message names `stash@{0}` when the conflict
+    came from a stash pop, and that stash is somebody's uncommitted work —
+    it is destroyed by anything that resets the store, which is the real
+    cost of following a `skt sync` prompt here.
+    """
+    record = unit.error(*STORE_BLOCKING_ERRORS)
+    if record is None:
+        return None
+    kind = record.get("kind")
+    recorded = str(record.get("message") or "").strip()
+    where = str(store) if store is not None else f"<this home>/skills/{unit.name}"
+    if kind == "MERGE_CONFLICT":
+        parked = " Local work is preserved at stash@{0}." if "stash@{" in recorded else ""
+        message = (
+            f"{unit.name} is not stale — its store is mid-merge (MERGE_CONFLICT): "
+            f"unmerged paths remain.{parked} Syncing re-runs the merge that made them."
+        )
+        fix = f"git -C {where} status   # resolve, then: git add + git commit"
+    elif kind == "NO_GIT_REMOTE":
+        message = (
+            f"{unit.name} cannot be synced (NO_GIT_REMOTE): its store is git-tracked "
+            f"but has no origin, so there is nothing to pull from."
+        )
+        fix = f"git -C {where} remote add origin <url>"
+    else:  # NEEDS_GIT_MIGRATION
+        message = (
+            f"{unit.name} cannot be synced (NEEDS_GIT_MIGRATION): its store has no .git, "
+            f"so sync and upgrade have nothing to advance."
+        )
+        fix = f"skill-manager uninstall {unit.name} && skill-manager install github:<owner>/<repo>"
+    note = {
+        "kind": "unit-error",
+        "unit": unit.name,
+        "state": kind,
+        "store": where,
+        "message": message,
+        "fix": fix,
+    }
+    if recorded:
+        # The home's own sentence, verbatim. It carries the timestamp's
+        # context — which remote, which branch, which stash — and nothing
+        # this function composes should replace it.
+        note["recorded"] = recorded
+    return note
+
+
 def _artifact_cause(row: dict, moved: dict) -> str:
     """Why this artifact is stale, in one clause, from TYPED evidence.
 
@@ -469,10 +578,26 @@ def collect(start: str | Path = ".", *, use_network: bool = True,
     for unit in managed:
         checked.append(unit.name)
         store = _store_dir(home, unit)
+        # BEFORE either verdict, and network-free: the home records why a
+        # store is where it is, and a state the installer wrote down is
+        # not something the pull/push heuristics get to re-diagnose from
+        # hashes. It also fires when the hashes AGREE — a store with
+        # unmerged paths is not well just because its record is current.
+        blocked = _blocking_error(unit, store)
+        if blocked is not None:
+            notifications.append(blocked)
         if use_network:
             tip = tips.get(unit.name)
             if tip is None:
                 unverifiable.append(unit.name)
+            elif blocked is not None:
+                # The disagreement with the tip has a RECORDED cause, and
+                # `blocked` already named it and its remedy. Neither a
+                # `new-version` prompt nor an `ahead_of_remote` label is
+                # true here: `hyper-experiments-finance` sits exactly ON
+                # its remote tip mid-conflict, which is neither stale nor
+                # ahead.
+                pass
             elif tip != unit.git_hash:
                 # `installed != tip` is not the same question as "is there
                 # anything to pull". A store carrying a commit the remote
@@ -504,7 +629,13 @@ def collect(start: str | Path = ".", *, use_network: bool = True,
                             "message": f"new version available for {unit.name} — pull with: skt sync {unit.name}",
                         }
                     )
-        if tier == "root":
+        if tier == "root" and blocked is None:
+            # The same unread field, on the push side. A conflicted store
+            # is `dirty` to `git status --porcelain`, so this branch used
+            # to answer a half-merged working tree with `skt publish` —
+            # which would carry the conflict markers upstream. `blocked`
+            # has already said what the state is; there is no second
+            # remedy to offer for the same fact.
             unit_dir = store
             if unit_dir:
                 state = _local_state(
@@ -700,6 +831,13 @@ def render_text(report: dict) -> str:
             # The command on its own line: this is the fast path for a
             # critical fix and it has to be retypable without editing.
             lines.append(f"    rebuild with: {note['fix']}")
+        elif note.get("kind") == "unit-error":
+            # Same shape, and for the same reason — plus the home's own
+            # recorded sentence, which names the remote, the branch and
+            # the stash this summary only alludes to.
+            if note.get("recorded"):
+                lines.append(f"    recorded: {note['recorded']}")
+            lines.append(f"    resolve with: {note['fix']}")
     lines += _artifact_lines(report)
     if unverifiable:
         lines.append(f"  unverifiable (remote unreachable): {', '.join(unverifiable)}")
