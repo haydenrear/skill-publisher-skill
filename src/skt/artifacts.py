@@ -699,9 +699,10 @@ def resolve_ids(
 
     A notification says `skt build computeq`, because that is what a person
     can retype; `skill-manager build` accepts full ids only. This bridges
-    the two, and REFUSES an ambiguous short name rather than picking one —
-    guessing which of two artifacts to rebuild is the kind of help nobody
-    asked for.
+    the two, and REFUSES a genuinely ambiguous short name rather than
+    picking one — guessing which of two artifacts to rebuild is the kind of
+    help nobody asked for. A name shared only across KINDS is not ambiguous
+    for this verb: exactly one kind has a producer, so it resolves.
 
     A token that already contains `:` is an id and is passed through
     untouched, so the common machine path costs no extra CLI call.
@@ -718,12 +719,12 @@ def resolve_ids(
         if token in by_id:
             out.append(token)
             continue
-        matches = [a.id for a in catalogue if a.short_name == token]
+        matches = [a for a in catalogue if a.short_name == token]
         if not matches:
-            matches = [a.id for a in catalogue if a.id.endswith("/" + token)
+            matches = [a for a in catalogue if a.id.endswith("/" + token)
                        or a.id.endswith(":" + token)]
         if len(matches) == 1:
-            out.append(matches[0])
+            out.append(matches[0].id)
             continue
         if not matches:
             near = tuple(a.id for a in catalogue if token in a.id)[:8]
@@ -732,9 +733,24 @@ def resolve_ids(
                 fix="skt status --json   # or: skill-manager artifacts list",
                 candidates=near,
             )
+        # A unit's name is shared by its store row, its shim, and its
+        # projection into every harness — measured, `tracing-observability`
+        # names 18 artifacts in the operator's project home. That is not a
+        # real ambiguity for THIS verb: exactly one kind has a producer, so
+        # narrowing to the buildable candidates resolves it without
+        # guessing. It matters because `skt check` prints `rebuild with:
+        # skt build <short name>`, and a remedy that refuses when it is
+        # retyped is worse than no remedy at all.
+        buildable = [a for a in matches if a.buildable]
+        if len(buildable) == 1:
+            out.append(buildable[0].id)
+            continue
+        ids = tuple(a.id for a in (buildable or matches))
         raise UnknownArtifact(
-            f"{token!r} names {len(matches)} artifacts in this home",
-            fix=f"skt build {matches[0]}   # name the id you meant",
-            candidates=tuple(matches[:8]),
+            f"{token!r} names {len(ids)} buildable artifacts in this home"
+            if buildable
+            else f"{token!r} names {len(ids)} artifacts in this home, none of them buildable",
+            fix=f"skt build {ids[0]}   # name the id you meant",
+            candidates=ids[:8],
         )
     return tuple(out)

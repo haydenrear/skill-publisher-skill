@@ -490,6 +490,41 @@ def test_a_short_name_resolves_to_its_id(tmp_path):
     )
 
 
+def test_a_unit_name_shared_with_its_projections_resolves_to_the_shim(tmp_path):
+    """The notification prints `skt build <short name>`; it has to work.
+
+    Measured on the operator's project home: `tracing-observability` names
+    18 artifacts — a unit-store row, a shim, and sixteen projections. Only
+    the shim has a producer, so this is not a real ambiguity for `build`,
+    and refusing it would make the printed remedy fail when retyped.
+    """
+    doc = json.loads(json.dumps(LIST_DOC))
+    doc["artifacts"] = [
+        dict(doc["artifacts"][0], id="cli-shim:skill-script/tracing-observability"),
+        dict(doc["artifacts"][1], id="unit-store:tracing-observability"),
+        dict(doc["artifacts"][1], id="projection:a#claude/skills/tracing-observability",
+             kind="projection"),
+        dict(doc["artifacts"][1], id="projection:a#codex/skills/tracing-observability",
+             kind="projection"),
+    ]
+    home = home_with(tmp_path, stdout=json.dumps(doc))
+    assert art.resolve_ids(["tracing-observability"], home=home) == (
+        "cli-shim:skill-script/tracing-observability",
+    )
+
+
+def test_a_name_shared_by_nothing_buildable_is_still_refused(tmp_path):
+    doc = json.loads(json.dumps(LIST_DOC))
+    doc["artifacts"] = [
+        dict(doc["artifacts"][1], id="unit-store:x"),
+        dict(doc["artifacts"][1], id="projection:a#claude/skills/x", kind="projection"),
+    ]
+    home = home_with(tmp_path, stdout=json.dumps(doc))
+    with pytest.raises(art.UnknownArtifact) as err:
+        art.resolve_ids(["x"], home=home)
+    assert "none of them buildable" in err.value.reason
+
+
 def test_an_ambiguous_short_name_is_refused_not_guessed(tmp_path):
     doc = json.loads(json.dumps(LIST_DOC))
     twin = dict(doc["artifacts"][0], id="cli-shim:brew/computeq")
@@ -497,7 +532,8 @@ def test_an_ambiguous_short_name_is_refused_not_guessed(tmp_path):
     home = home_with(tmp_path, stdout=json.dumps(doc))
     with pytest.raises(art.UnknownArtifact) as err:
         art.resolve_ids(["computeq"], home=home)
-    assert "names 2 artifacts" in err.value.reason
+    # Two shims, both buildable: a real ambiguity, and it is refused.
+    assert "names 2 buildable artifacts" in err.value.reason
     assert set(err.value.candidates) == {
         "cli-shim:skill-script/computeq", "cli-shim:brew/computeq"
     }
