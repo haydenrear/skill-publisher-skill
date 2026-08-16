@@ -1,0 +1,13 @@
+{
+  "bindings": {
+    "build-logic": "project_sdk_sources/build-logic",
+    "sdk": "project_sdk_sources/sdk",
+    "standard-nodes": "project_sdk_sources/standard-nodes"
+  },
+  "provider_candidates": [
+    {
+      "kind": "skill-root"
+    }
+  ],
+  "schema_version": "test-graph.provider-bindings.v1"
+}
