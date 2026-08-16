@@ -12,6 +12,7 @@ age attached so a reader can see how old they are.
 from __future__ import annotations
 
 import json
+import shlex
 import time
 from pathlib import Path
 
@@ -153,7 +154,7 @@ def _artifact_lines(block: dict | None) -> list[str]:
     )
     lines = [line]
     if block.get("rebuildable"):
-        names = [row.get("name", "?") for row in (block.get("rows") or [])]
+        names = [shlex.quote(row.get("name", "?")) for row in (block.get("rows") or [])]
         shown = ", ".join(names[:MAX_TEXT_ARTIFACTS])
         if len(names) > MAX_TEXT_ARTIFACTS:
             shown += f" +{len(names) - MAX_TEXT_ARTIFACTS} more"

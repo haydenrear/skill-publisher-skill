@@ -25,8 +25,16 @@ counts for what it drops stay in the report under `artifacts`.
 **The artifact probe is on the LIVE path and nowhere else.** It is a
 subprocess, and `--cached` is contract-cache-only in every cache state
 (below). `skt.artifacts` is imported INSIDE `collect()` rather than at
-the top of this file, so the cache-only path does not so much as load
-the module that could spawn one.
+the top of this file, so nothing on the cached path can reach it — not
+even by accident, because a module-scope import here would be circular
+(`artifacts` -> `publish` -> `check`) and fail loudly at import time.
+
+That is a statement about THIS module, not about the process. The real
+hook path runs `cli.py`, which imports the `skt` package, whose
+`__init__` re-exports the artifact surface — so `skt.artifacts` IS in
+`sys.modules` by the time `check --cached` runs. Importing it costs no
+spawn and no measurable time; what matters is that the cached path never
+CALLS it, which is what the tests drive.
 
 `--cached` is contract-cache-only: it reads the state file and NOTHING
 else — no subprocess, no network, no fallback to a live check, whatever
@@ -77,6 +85,8 @@ import signal
 import subprocess
 import time
 from pathlib import Path
+
+import shlex
 
 from . import context as ctx_mod
 from . import homes
@@ -396,14 +406,26 @@ def _artifact_notifications(state: dict, unit_notes: list[dict]) -> list[dict]:
                 "owner": row.get("owner"),
                 "message": f"artifact {name} is stale ({_artifact_cause(row, moved)})",
                 # The command, alone, so a consumer can run it without
-                # extracting it from a sentence.
-                "fix": f"skt build {name}",
+                # extracting it from a sentence — and SHELL-QUOTED, because
+                # the whole value of this line is that it can be retyped.
+                # One of the seven rebuildable artifacts in the operator's
+                # own project home is `jinja2-cli[yaml]`, and unquoted that
+                # is `zsh: no matches found` in the operator's own shell.
+                "fix": f"skt build {shlex.quote(name)}",
             }
         )
     return out
 
 
-def collect(start: str | Path = ".", *, use_network: bool = True) -> dict:
+def collect(start: str | Path = ".", *, use_network: bool = True,
+            probe_artifacts: bool = True) -> dict:
+    """One live pass. `use_network` governs the REMOTE phase only.
+
+    The artifact probe is local — it asks this home's own CLI about this
+    home's own disk — so it is not covered by `use_network` and gets its
+    own switch rather than quietly widening that flag's meaning. Both are
+    bounded by the one shared deadline.
+    """
     home = homes.find_home(start)
     if home is None:
         return {"schema": SCHEMA_VERSION, "home": None, "error": "no skill-manager home found"}
@@ -515,7 +537,8 @@ def collect(start: str | Path = ".", *, use_network: bool = True) -> dict:
     # unit notifications later than they already were; the cost is that a
     # pass whose remotes ate the whole budget reports the artifacts
     # `timeout` rather than silently skipping them.
-    artifacts = _artifact_state(home, deadline)
+    artifacts = (_artifact_state(home, deadline) if probe_artifacts
+                 else {"state": "off", "reason": "probe_artifacts=False"})
     artifact_notes = _artifact_notifications(artifacts, notifications)
     if artifact_notes:
         # The record's rows are reordered to match the notifications, so
@@ -556,7 +579,17 @@ def _write_cache(report: dict) -> None:
         return
     checked = report.get("checked_units") or []
     unverifiable = report.get("unverifiable") or []
-    artifacts_resolved = (report.get("artifacts") or {}).get("state") == "ok"
+    artifacts = report.get("artifacts") or {}
+    # "The CLI answered" is not "anything was decided". A pass where every
+    # one of 190 artifacts came back `unverifiable` resolved exactly as
+    # much as a pass where no remote was reachable, and caching it would
+    # let --cached serve `all current` at exit 0 for a whole TTL over a
+    # home nothing in that pass could decide — the failure the predicate
+    # below exists to prevent, arriving through the new dimension.
+    artifacts_resolved = (
+        artifacts.get("state") == "ok"
+        and (artifacts.get("stale") or 0) + (artifacts.get("current") or 0) > 0
+    )
     if (
         report.get("network")
         and checked
@@ -687,6 +720,14 @@ def _artifact_lines(report: dict) -> list[str]:
     state = report.get("artifacts") or {}
     kind = state.get("state")
     if kind == "ok":
+        decided = (state.get("stale") or 0) + (state.get("current") or 0)
+        if not decided and (state.get("unverifiable") or 0):
+            # Rare and pathological, and it must not read as an all-clear:
+            # every artifact answered "I could not be decided".
+            return [
+                f"  none of this home's {state.get('total', 0)} artifacts could be "
+                f"decided — see: skill-manager artifacts stale --unverifiable"
+            ]
         shown = len([n for n in report.get("notifications") or []
                      if n.get("kind") == "stale-artifact"])
         extra = (state.get("rebuildable") or 0) - shown

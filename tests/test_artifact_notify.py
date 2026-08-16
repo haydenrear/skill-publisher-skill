@@ -10,6 +10,7 @@ exists to catch — so the poisoning below is deliberately broader than
 states are driven through them.
 """
 
+import ast
 import concurrent.futures
 import json
 import os
@@ -339,6 +340,55 @@ NOTE = {
 }
 
 
+#: Every `artifacts.state` a cached record can carry. The four non-`ok`
+#: ones exist because a cached-path spawn conditioned on "the last pass
+#: could not measure, so measure now" is a plausible regression that a
+#: suite seeded only with `ok` records never drives — it would pass the
+#: whole poisoning matrix below while breaking the contract the matrix
+#: exists to protect.
+ARTIFACT_STATES = {
+    "ok": ARTIFACT_BLOCK,
+    "unsupported": {"state": "unsupported",
+                    "reason": "the pin predates the artifact graph",
+                    "fix": "skt sync skill-manager"},
+    "timeout": {"state": "timeout", "reason": "did not finish inside 6.0s", "fix": "skt check"},
+    "error": {"state": "error", "reason": "exit 70", "fix": "run it yourself"},
+    "no-cli": {"state": "no-cli", "reason": "this home has no pin", "fix": "home shims"},
+    "off": {"state": "off", "reason": "SKT_ARTIFACTS is set to off"},
+}
+
+
+@pytest.mark.parametrize("artifact_state", sorted(ARTIFACT_STATES))
+@pytest.mark.parametrize("state", ["fresh", "expired"])
+def test_cached_spawns_nothing_for_any_recorded_artifact_state(
+    tmp_path, monkeypatch, capsys, state, artifact_state
+):
+    """The cross product the first version of this suite did not drive.
+
+    A cached record whose `artifacts.state` is `timeout` or `error` is
+    exactly the shape that invites "the last pass could not measure it, so
+    measure it now" — a repair on the 2-second path. There is no such
+    repair, in any of the six states, fresh or expired.
+    """
+    repo = make_repo(tmp_path / "repo")
+    home = make_home(repo)
+    fake_cli(home, stdout=json.dumps(STALE_DOC))  # present, and never used
+    checked_at = time.time() if state == "fresh" else time.time() - 10_000
+    seed_record(home, artifacts=ARTIFACT_STATES[artifact_state], checked_at=checked_at)
+
+    forbid_every_spawn(monkeypatch)
+    started = time.monotonic()
+    rc = check_mod.run(as_json=True, cached=True, ttl=900, start=repo)
+    assert time.monotonic() - started < 2
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0  # no notifications were seeded in either record
+    if state == "fresh":
+        assert report["artifacts"]["state"] == artifact_state
+    else:
+        assert report["cache_state"] == check_mod.CACHE_EXPIRED
+        assert "artifacts" not in report
+
+
 @pytest.mark.parametrize("state", ["fresh", "expired", "missing", "malformed", "no-home"])
 def test_cached_spawns_nothing_in_any_cache_state(tmp_path, monkeypatch, capsys, state):
     repo = make_repo(tmp_path / "repo")
@@ -390,30 +440,36 @@ def test_cached_spawns_nothing_in_any_cache_state(tmp_path, monkeypatch, capsys,
             assert report["stale"]["artifacts"]["stale"] == 55
 
 
-def test_the_cached_path_never_imports_the_probe(tmp_path, monkeypatch):
-    """Not merely "does not spawn": does not LOAD the module that could.
+def test_check_does_not_import_the_probe_at_module_scope(tmp_path):
+    """The import lives inside `collect()`; this asserts it by AST.
 
-    `skt.artifacts` is imported inside `collect()` for this reason, and a
-    reviewer replacing it with a top-of-file import would pass every
-    spawn-poisoning test above and break this one.
+    The first spelling of this test was `"import artifacts" not in <top of
+    file>` — a substring scan of ONE spelling, which `from .artifacts
+    import stale` walks straight past. Parsing the module and looking at
+    its top-level body catches every spelling.
+
+    Worth being exact about what this does and does not claim. It does NOT
+    claim `skt.artifacts` is absent from `sys.modules` on the hook path: the
+    real entry point imports the `skt` package, whose `__init__` re-exports
+    the surface, so it is loaded there — at no spawn and no measurable cost.
+    What it claims is that nothing on the cached path in THIS module reaches
+    for it, which is the property the poisoning tests then drive.
     """
-    proc = subprocess.run(
-        [sys.executable, "-c",
-         "import sys; sys.path.insert(0, %r);\n"
-         "from skt import check;\n"
-         "print('skt.artifacts' in sys.modules)"
-         % str(Path(__file__).resolve().parents[1] / "src")],
-        capture_output=True, text=True,
-    )
-    # Importing the PACKAGE re-exports the surface, so the honest assertion
-    # is about `check` alone: import it as a module and nothing about the
-    # cached path reaches for the prober.
-    assert proc.returncode == 0, proc.stderr
     source = (Path(__file__).resolve().parents[1] / "src" / "skt" / "check.py").read_text()
-    top = source.split("def _artifact_state", 1)[0]
-    assert "import artifacts" not in top, (
-        "skt.artifacts must be imported inside collect(), not at module scope"
+    module = ast.parse(source)
+    offenders = []
+    for node in module.body:  # TOP LEVEL only — a nested import is the point
+        if isinstance(node, ast.Import):
+            offenders += [a.name for a in node.names if "artifacts" in a.name]
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "").endswith("artifacts"):
+                offenders.append(node.module)
+            offenders += [a.name for a in node.names if a.name == "artifacts"]
+    assert offenders == [], (
+        f"skt.artifacts must be imported inside collect(), not at module scope: {offenders}"
     )
+    # And it really is imported somewhere, or the assertion above is vacuous.
+    assert "import artifacts as artifacts_mod" in source
 
 
 def test_the_dedup_marker_stays_unconditional(tmp_path):
@@ -430,6 +486,86 @@ def test_the_dedup_marker_stays_unconditional(tmp_path):
     # The fallback exists precisely so the dedup is not conditional on the
     # home being resolvable.
     assert 'if [ -z "$HOME_DIR" ]' in hook
+
+
+def test_a_pass_that_decided_nothing_is_not_cached_as_a_result(tmp_path):
+    """`state == "ok"` means the CLI answered, not that anything was decided.
+
+    All remotes unreachable AND every artifact `unverifiable` is a pass that
+    resolved exactly as much as one that reached no remote at all. Caching
+    it lets `--cached` serve `all current` at exit 0 for a whole TTL over a
+    home nothing in that pass could decide.
+    """
+    doc = {"schema": 2, "home": "/h",
+           "summary": {"artifacts": 190, "stale": 0, "unverifiable": 190,
+                       "current": 0, "stale_by_kind": {}},
+           "stale": [],
+           "unverifiable": [{"id": f"cli-shim:brew/t{i}", "kind": "cli-shim",
+                             "owner": "u", "freshness": "unverifiable",
+                             "materialization": "unknown",
+                             "reason": "no install fingerprint", "because": []}
+                            for i in range(190)]}
+    repo, home = home_with_artifacts(tmp_path, doc)
+    report = check_mod.collect(repo)
+    report["network"] = True
+    report["checked_units"] = ["alpha"]
+    report["unverifiable"] = ["alpha"]  # the remote half resolved nothing either
+    check_mod._write_cache(report)
+    assert not check_mod.state_file(home).exists(), (
+        "a pass that decided nothing on either axis must not be cached"
+    )
+    # And it must not read as an all-clear where it IS shown.
+    assert "could be decided" in check_mod.render_text(report)
+
+
+def test_one_decided_artifact_is_still_a_result_worth_caching(tmp_path):
+    """The offline session this predicate was widened for, unchanged."""
+    repo, home = home_with_artifacts(tmp_path)  # 3 stale, 1 unverifiable
+    report = check_mod.collect(repo)
+    report["network"] = True
+    report["checked_units"] = ["alpha"]
+    report["unverifiable"] = ["alpha"]
+    check_mod._write_cache(report)
+    assert check_mod.state_file(home).exists()
+
+
+def test_the_printed_command_survives_the_operators_shell(tmp_path):
+    """`skt build jinja2-cli[yaml]` is `zsh: no matches found` in zsh.
+
+    One of the seven rebuildable artifacts in the operator's own project
+    home is named exactly that. A notification whose entire value is a
+    retypable command has to be quoted.
+    """
+    doc = json.loads(json.dumps(STALE_DOC))
+    doc["stale"] = [dict(doc["stale"][0], id="cli-shim:pip/jinja2-cli[yaml]")]
+    repo, home = home_with_artifacts(tmp_path, doc)
+    report = check_mod.collect(repo)
+    note = [n for n in report["notifications"] if n["kind"] == "stale-artifact"][0]
+    assert note["fix"] == "skt build 'jinja2-cli[yaml]'"
+    assert "skt build 'jinja2-cli[yaml]'" in check_mod.render_text(report)
+    # A name that needs no quoting must not acquire any.
+    plain = check_mod._artifact_notifications(
+        {"state": "ok", "rows": [{"id": "cli-shim:skill-script/computeq",
+                                  "name": "computeq", "kind": "cli-shim",
+                                  "owner": "u", "reason": "moved", "because": []}]}, [])
+    assert plain[0]["fix"] == "skt build computeq"
+
+
+def test_use_network_governs_the_remote_phase_only(tmp_path):
+    """It always meant "no remote", never "no subprocess" — root-tier
+    `_local_state` has always run git under it. The artifact probe is local
+    too, so it gets its OWN switch rather than widening that flag's meaning
+    behind a caller's back."""
+    log = tmp_path / "argv.log"
+    repo = make_repo(tmp_path / "repo")
+    home = make_home(repo)
+    fake_cli(home, stdout=json.dumps(STALE_DOC), argv_log=log)
+    check_mod.collect(repo, use_network=False)
+    assert log.exists(), "a local probe is not governed by use_network"
+    log.unlink()
+    report = check_mod.collect(repo, use_network=False, probe_artifacts=False)
+    assert not log.exists()
+    assert report["artifacts"]["state"] == "off"
 
 
 # --------------------------------------------------------- status read-back
