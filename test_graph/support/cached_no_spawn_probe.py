@@ -50,7 +50,6 @@ OUT = Path(sys.argv[3])
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from skt import check as check_mod  # noqa: E402
-from skt import homes as homes_mod  # noqa: E402
 
 TTL = 900
 
