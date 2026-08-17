@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 # Subcommand -> (implementing ticket, issue URL) for honest stubs.
 # Empty since SKT-5; kept for future subcommands landing across tickets.
@@ -92,10 +92,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="sweep: the destination home for the `home close-out` gate "
         "(default: the MAIN working tree's .skill-manager)",
     )
+    # NOT a continuation of an existing convention, whatever #32's
+    # description claimed. `-y` pre-exists on exactly ONE subcommand,
+    # `skt build`, where it means "skip skill-manager's interactive
+    # confirmation" — a prompt suppressor on a command that was going to
+    # act anyway. Here it is the ARM SWITCH: without it nothing is
+    # removed at all. Same spelling, opposite kind of flag, and the new
+    # meaning is the right one for a destructive fleet verb; the
+    # continuity story was the part that was wrong.
     ticket.add_argument(
         "-y", "--yes", action="store_true",
-        help="sweep: actually remove. Without it the sweep is a dry run that "
-        "prints the plan and changes nothing.",
+        help="sweep: ARM the pass — actually remove. Without it the sweep is a dry "
+        "run that prints the plan and changes nothing. (Unlike `skt build -y`, "
+        "which only suppresses a confirmation prompt.)",
     )
     ticket.add_argument("--json", action="store_true", help="list/sweep: machine-readable output")
 

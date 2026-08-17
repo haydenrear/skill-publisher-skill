@@ -29,18 +29,36 @@ the normal case, not the exotic one. A plan computed at t=0 is a
 description of the past. So :func:`inspect` runs again inside the
 removal loop and the second answer is the one that decides.
 
-Five things make a worktree **skipped, not removed**, and a skip is a
+Seven things make a worktree **skipped, not removed**, and a skip is a
 normal outcome that keeps the pass going:
 
   locked           git itself refuses; say so rather than discover it.
   uncommitted      the only state `git worktree remove` alone protects.
   stash entries    attributed by branch — see `_stash_entries`.
-  unpushed commits the branch ref outlives the worktree, so this is not
-                   a data-loss gate; it is the workflow one. Work that
-                   never reached the remote has not been reviewed, and
-                   retiring its worktree is how it gets forgotten.
+  unpushed commits on a branch, the ref outlives the worktree, so this is
+                   not a data-loss gate; it is the workflow one. Work
+                   that never reached the remote has not been reviewed,
+                   and retiring its worktree is how it gets forgotten.
+                   On a DETACHED HEAD there is no ref to outlive
+                   anything, so the same fact is a data-loss gate and is
+                   enforced even where `remotes` is False.
   not contained    commits not in the epic/target branch: the ticket did
                    not land, whatever its branch says.
+  UNCHECKABLE      no epic/target branch is known at all, so containment
+  containment      is not a fact this pass holds. git-epic-workflow's
+                   worktree-lifecycle §5 makes epic-unmerged work a HARD
+                   STOP before any removal, and a stop that only happens
+                   when somebody remembered `--epic` is not one. Every
+                   other evidence gap in this module blocks; so does
+                   this one. (It shipped as a warning, which meant a
+                   bare `skt ticket sweep --yes` in a repository with no
+                   discoverable `epic/*` removed worktrees whose commits
+                   were pushed and merged nowhere.)
+  a probe that     an evidence gap is not a clean bill of health — see
+  could not run    `unmeasured`. `git remote` is in that set too: `""`
+                   (no remote configured) and a FAILED probe are
+                   different answers and collapsing them with `bool()`
+                   silently disabled the unpushed gate.
 
 and one more that is not a property of the repository at all: the
 worktree's Skill Manager home. `git worktree remove` deletes
@@ -48,6 +66,26 @@ worktree's Skill Manager home. `git worktree remove` deletes
 so the gate is `skill-manager home close-out --home <worktree-home>
 --into <destination>`, which is the same gate `skt ticket close` runs,
 here run per worktree. A non-clean verdict skips.
+
+The order inside the loop is **inspect → gate → inspect → remove**, and
+the last inspect is the one the sentence above is about. The gate is
+allowed up to `GATE_TIMEOUT_SECONDS` (180), so a git answer taken before
+it can be three minutes old by removal time — long enough for the agent
+in that worktree to land a commit. `git worktree remove` refuses a dirty
+tree on its own, so only new *commits* could slip through and those keep
+their branch ref; the re-check is still cheap and the docstring should
+be literally true. The FIRST inspect is a pre-filter, kept because a
+dirty worktree must not cost a full two-home compare to reject (and
+because a test pins that the gate is never even asked about one).
+
+`.skill-manager` is not the only thing in a worktree that git cannot
+see. `git status --porcelain` does not report ignored paths and
+`git worktree remove` deletes them without `--force`, so `.env`,
+`.venv` and local scratch go the same way. Those are listed with
+`--ignored=matching` and reported as a WARNING, not a blocker: most
+ignored content is genuinely disposable, and a gate that fires on every
+worktree is a gate people turn off. Only the home has a real gate, and
+only because a skill edit inside one reaches no repository at all.
 
 **The destination home is the MAIN working tree's**, resolved from the
 primary checkout — never `homes.find_home(".")`. Run from inside a
@@ -137,16 +175,31 @@ GATE_EXIT_FROZEN = 9
 
 #: This command's own exits.
 #:
-#:   0  the pass completed. Removals AND safety skips both live here: a
-#:      skip is the gate doing its job, and `build_cmd` sets the same
-#:      precedent for `not buildable here` rows ("that is not a failure
-#:      of this run and exiting non-zero for it would make every printed
-#:      remedy fail after doing its job correctly").
+#:   0  the pass completed and every sweepable worktree was retired (or
+#:      there was nothing to retire). A DRY RUN is 0 too: it makes no
+#:      claim to have done anything, and its own output says so in the
+#:      first line and the last.
+#:   4  the ARMED pass completed but a gate refused at least one
+#:      worktree. Not a failure — a skip is the gate doing its job — but
+#:      it did not do what it was asked, and that has to be visible
+#:      without parsing `--json`. 4 is `skt ticket close`'s CloseRefused
+#:      code (`ticket.py`), and this is the same gate refusing the same
+#:      teardown, one worktree at a time; giving the fleet verb a
+#:      different number for the identical event is the divergence.
+#:      `build_cmd`'s `not buildable here` precedent for exit 0 does not
+#:      reach here: a row nothing could ever build is a statement about
+#:      the environment, while a skip is an OUTSTANDING ACTION with a
+#:      printed remedy — closer to `check`'s and `publish --check`'s
+#:      "something needs doing" exit 10 than to a no-op.
 #:   1  something FAILED — a removal errored, or a gate could not
 #:      establish anything — or a precondition refused before the pass.
 #:   9  the destination home is frozen; the pass was abandoned.
+#:
+#: Precedence when several apply: 9 (nothing was assessed after it) > 1
+#: (something broke) > 4 (something was refused) > 0.
 EXIT_OK = 0
 EXIT_FAILED = 1
+EXIT_SKIPPED_FOR_SAFETY = 4
 EXIT_FROZEN_DESTINATION = GATE_EXIT_FROZEN
 
 TICKET_PLAN = "specs/desired_program_model/ticket_plan.yaml"
@@ -452,9 +505,21 @@ class Status:
     prunable: str | None = None
     unmeasured: tuple[str, ...] = ()
     #: False when the repository has NO remote at all. "Unpushed" is then
-    #: a question with no meaning — and the branch ref outlives the
-    #: worktree either way — so it is reported and not enforced.
+    #: a question with no meaning — and on a branch the ref outlives the
+    #: worktree either way — so it is reported and not enforced. A remote
+    #: probe that FAILED is not this: it lands in `unmeasured` and blocks.
     remotes: bool = True
+    #: No branch, so nothing but the worktree references its tip. Turns
+    #: the unpushed check from a workflow gate into a data-loss one and
+    #: makes the `remotes=False` note tell the truth.
+    detached: bool = False
+    #: Gitignored paths `git worktree remove` would delete silently,
+    #: excluding the home (which has its own gate). A WARNING — see the
+    #: module docstring on why this one is not a refusal.
+    ignored: tuple[str, ...] = ()
+    #: False when the ignored-path listing itself could not be read. Also
+    #: only a warning, for the same reason.
+    ignored_measured: bool = True
 
     @property
     def blockers(self) -> tuple[str, ...]:
@@ -472,9 +537,18 @@ class Status:
                 f"{len(self.stashes)} stash entr{'y' if len(self.stashes) == 1 else 'ies'} "
                 f"made here: {', '.join(self.stashes[:MAX_REASON_ITEMS])}"
             )
-        if self.unpushed and self.remotes:
-            where = self.upstream or "any remote"
-            out.append(f"{self.unpushed} commit(s) not pushed to {where}")
+        if self.unpushed:
+            if self.detached:
+                # No branch means no ref survives the removal, so this is
+                # the one place `unpushed` is data loss rather than
+                # process — and it holds whether or not there is a remote.
+                out.append(
+                    f"{self.unpushed} commit(s) on a DETACHED HEAD, so no ref will outlive "
+                    "this worktree — removing it leaves them reachable only from the reflog"
+                )
+            elif self.remotes:
+                where = self.upstream or "any remote"
+                out.append(f"{self.unpushed} commit(s) not pushed to {where}")
         if self.not_in_target:
             out.append(f"{self.not_in_target} commit(s) not contained in {self.target}")
         # An evidence gap is not a clean bill of health. `_local_state`
@@ -483,21 +557,46 @@ class Status:
         # read as "nothing here".
         for probe in self.unmeasured:
             out.append(f"could not determine {probe} — refusing to guess")
+        if self.target is None:
+            # Last, so an unmeasured probe still leads the list: this one
+            # is identical for every worktree in the pass and the
+            # per-worktree facts are the more actionable read.
+            out.append(
+                "containment is UNCHECKABLE here: no epic/target branch is known, so "
+                "whether these commits landed anywhere was never established — pass "
+                "--epic <slug> or --target <ref>"
+            )
         return tuple(out)
 
     @property
     def warnings(self) -> tuple[str, ...]:
         out: list[str] = []
-        if self.target is None:
-            out.append(
-                "no epic/target branch known, so containment was not checked "
-                "(pass --epic <slug> or --target <ref>)"
-            )
         if not self.remotes:
+            outlives = (
+                "this worktree is at a DETACHED HEAD, so no ref outlives it"
+                if self.detached
+                else "its branch ref outlives the worktree"
+            )
             out.append(
                 f"this repository has no remote, so `pushed` has no meaning here — "
-                f"{self.unpushed or 0} commit(s) exist only in this clone, and its "
-                "branch ref outlives the worktree"
+                f"{self.unpushed or 0} commit(s) exist only in this clone, and "
+                f"{outlives}"
+            )
+        if not self.ignored_measured:
+            out.append(
+                "could not list gitignored paths, so what removal would delete beyond "
+                "git's view here is unknown"
+            )
+        elif self.ignored:
+            shown = ", ".join(self.ignored[:MAX_REASON_ITEMS])
+            more = (
+                f" +{len(self.ignored) - MAX_REASON_ITEMS} more"
+                if len(self.ignored) > MAX_REASON_ITEMS
+                else ""
+            )
+            out.append(
+                f"{len(self.ignored)} gitignored path(s) will be DELETED with the worktree "
+                f"and are in no diff: {shown}{more}"
             )
         return tuple(out)
 
@@ -542,23 +641,41 @@ def inspect(wt: Worktree, *, root: Path, target: str | None) -> Status:
     unbounded-time failure lands in `unmeasured`, which blocks.
     """
     unmeasured: list[str] = []
-    dirty: tuple[str, ...] = ()
+    dirty: list[str] = []
+    ignored: list[str] = []
+    ignored_measured = True
     if not wt.missing:
-        porcelain = _out("status", "--porcelain", cwd=wt.path)
+        # `--ignored=matching` in the SAME call: ignored paths are deleted
+        # by `git worktree remove` without `--force` and reported by no
+        # plain `status`, and one probe answers both questions.
+        porcelain = _out("status", "--porcelain", "--ignored=matching", cwd=wt.path)
         if porcelain is None:
             unmeasured.append("the working tree state")
-        elif porcelain:
-            dirty = tuple(
-                line.strip()
-                for line in porcelain.splitlines()
-                if line.strip() and not _is_home_path(line)
-            )
+            ignored_measured = False
+        else:
+            for line in porcelain.splitlines():
+                if not line.strip() or _is_home_path(line):
+                    continue
+                if line.startswith("!!"):
+                    ignored.append(_porcelain_path(line))
+                else:
+                    dirty.append(line.strip())
 
     stashes, measured = _stash_entries(root, wt.branch)
     if not measured:
         unmeasured.append("the stash")
 
-    remotes = bool(_out("remote", cwd=root))
+    # `""` (no remote configured) and None (the probe failed) are
+    # DIFFERENT answers, and `bool()` collapsed them — which turned a
+    # failed probe into `remotes=False`, i.e. into the one value that
+    # disables the unpushed gate. Every other probe in this function
+    # fails closed; so does this one.
+    remote_names = _out("remote", cwd=root)
+    if remote_names is None:
+        unmeasured.append("whether this repository has any remote")
+        remotes = True
+    else:
+        remotes = bool(remote_names)
     upstream = _out(
         "rev-parse", "--abbrev-ref", "--symbolic-full-name", f"{wt.rev}@{{upstream}}", cwd=root
     ) or None
@@ -579,7 +696,7 @@ def inspect(wt: Worktree, *, root: Path, target: str | None) -> Status:
             unmeasured.append(f"whether its commits are contained in {target}")
 
     return Status(
-        dirty=dirty,
+        dirty=tuple(dirty),
         stashes=stashes,
         upstream=upstream,
         unpushed=unpushed,
@@ -590,17 +707,30 @@ def inspect(wt: Worktree, *, root: Path, target: str | None) -> Status:
         prunable=wt.prunable,
         unmeasured=tuple(unmeasured),
         remotes=remotes,
+        detached=wt.branch is None,
+        ignored=tuple(ignored),
+        ignored_measured=ignored_measured,
     )
+
+
+def _porcelain_path(porcelain_line: str) -> str:
+    """The path a `status --porcelain` line is about.
+
+    Lines are `XY <path>` — `!! <path>` for an ignored one — with a
+    possible `-> <path>` rename tail, and a quoted path when it needs
+    escaping.
+    """
+    body = porcelain_line[2:].strip().strip('"')
+    return body.split(" -> ")[-1].strip().strip('"')
 
 
 def _is_home_path(porcelain_line: str) -> bool:
     """Does this `status --porcelain` line describe the worktree's home?
 
-    See :data:`HOME_DIR`. Porcelain lines are `XY <path>` with a possible
-    `-> <path>` rename tail, and a quoted path when it needs escaping.
+    See :data:`HOME_DIR`. True for the ignored (`!! .skill-manager/`)
+    spelling as well: the home is the gate's business either way.
     """
-    body = porcelain_line[2:].strip().strip('"')
-    body = body.split(" -> ")[-1].strip().strip('"')
+    body = _porcelain_path(porcelain_line)
     return body == HOME_DIR or body.startswith(HOME_DIR + "/")
 
 
@@ -909,6 +1039,31 @@ def build_plan(
 
     if into is not None:
         destination = Path(into).expanduser().resolve()
+        # `--into` is the one way back into the self-comparison trap the
+        # default resolution exists to avoid: a close-out gate whose
+        # `--home` and `--into` name the same directory compares a home
+        # against itself and reports clean for EVERYTHING, and then this
+        # command deletes the lot. Naming any path inside a linked
+        # worktree is refused, not warned about — that worktree is a
+        # removal candidate, and the argument is unusable either way.
+        for wt in trees:
+            if wt.primary:
+                continue
+            wt_path = wt.path.expanduser().resolve()
+            if destination == wt_path or wt_path in destination.parents:
+                return Plan(
+                    root=root, destination=None, target=None, epic=epic, current=current,
+                    error=(
+                        f"--into {destination} belongs to the worktree {wt.path}, which this "
+                        "sweep may remove. A gate whose --home and --into are the same home "
+                        "compares it against itself and calls every unit clean"
+                    ),
+                    fix=(
+                        f"--into {root / HOME_DIR}   # the MAIN working tree's home, which is "
+                        "also the default — omit --into entirely unless the destination is "
+                        "somewhere else again"
+                    ),
+                )
     else:
         # THE MAIN WORKING TREE'S home, never `homes.find_home(".")` —
         # see the module docstring.
@@ -983,6 +1138,21 @@ class SweepResult:
         return sum(1 for s in self.steps if s.action == action)
 
 
+def _measure(candidate: Candidate, step: Step, plan: Plan) -> Status:
+    """Re-`inspect` one candidate and fold the answer into its row.
+
+    Called TWICE per candidate inside the removal loop — once as a cheap
+    pre-filter and once after the gate, immediately before the removal.
+    Both readers of the result (the candidate's status and the step's
+    notes) have to move together, which is the whole reason this is one
+    function and not three lines written out twice.
+    """
+    status = inspect(candidate.worktree, root=plan.root, target=plan.target)
+    candidate.status = status
+    step.notes = status.warnings + _prunable_note(candidate.worktree)
+    return status
+
+
 def sweep(
     *,
     start: str | Path = ".",
@@ -1049,11 +1219,10 @@ def sweep(
     for index, candidate in enumerate(queue):
         wt = candidate.worktree
         step = Step(ticket=wt.ticket, path=wt.path, branch=wt.branch, action="skipped")
-        # RE-MEASURED here, immediately before this worktree is removed.
-        # The plan above is minutes old by now.
-        status = inspect(wt, root=plan.root, target=plan.target)
-        candidate.status = status
-        step.notes = status.warnings + _prunable_note(wt)
+        # PRE-FILTER. The plan above is minutes old by now, and a
+        # worktree that is already blocked must not cost a full compare
+        # of two homes to reject.
+        status = _measure(candidate, step, plan)
         if not status.clean:
             step.reasons = status.blockers
             result.steps.append(step)
@@ -1072,6 +1241,16 @@ def sweep(
             step.action = "failed" if verdict.fault else "skipped"
             step.reasons = (verdict.reason, *verdict.blockers)
             step.fix = verdict.fix
+            result.steps.append(step)
+            continue
+        # RE-MEASURED here, AFTER the gate and immediately before the
+        # removal — which is what "immediately before" has to mean if the
+        # sentence is to be literal. The gate is allowed 180s and is the
+        # slow step by an order of magnitude, so the answer taken before
+        # it is the oldest fact in this loop.
+        status = _measure(candidate, step, plan)
+        if not status.clean:
+            step.reasons = status.blockers
             result.steps.append(step)
             continue
         if not verdict.ran:
@@ -1107,6 +1286,11 @@ def sweep(
     result.free_after = _free_bytes(plan.root)
     if result.exit_code == EXIT_OK and result.count("failed"):
         result.exit_code = EXIT_FAILED
+    elif result.exit_code == EXIT_OK and result.count("skipped"):
+        # See EXIT_SKIPPED_FOR_SAFETY: `0 removed, N skipped for safety`
+        # at exit 0 is indistinguishable from "nothing to do" without
+        # parsing --json, and a fully refused pass is a normal outcome.
+        result.exit_code = EXIT_SKIPPED_FOR_SAFETY
     return result
 
 
@@ -1135,7 +1319,8 @@ def _header(plan: Plan) -> list[str]:
     target = (
         f"target     {plan.target} — commits must be contained in it"
         if plan.target
-        else "target     none — containment NOT checked (pass --epic <slug> or --target <ref>)"
+        else "target     none — containment is UNCHECKABLE, so every worktree is REFUSED "
+             "(pass --epic <slug> or --target <ref>)"
     )
     return [epic, target, f"home       close-out destination: {plan.destination}"]
 
@@ -1262,8 +1447,10 @@ def render_sweep(result: SweepResult) -> str:
         )
     if result.count("skipped"):
         lines.append(
-            "Skipped is a normal outcome, not an error: clear each blocker above and "
-            "re-run. `--force` is never passed here and is not the remedy."
+            f"Skipped is a normal outcome, not an error — but it is an OUTSTANDING one, so "
+            f"this pass exits {EXIT_SKIPPED_FOR_SAFETY} (the code `skt ticket close` returns "
+            "when the same gate refuses the same teardown), not 0. Clear each blocker above "
+            "and re-run. `--force` is never passed here and is not the remedy."
         )
     return "\n".join(lines)
 
@@ -1282,6 +1469,9 @@ def _status_json(status: Status) -> dict:
         "prunable": status.prunable,
         "unmeasured": list(status.unmeasured),
         "remotes": status.remotes,
+        "detached": status.detached,
+        "ignored": list(status.ignored),
+        "ignored_measured": status.ignored_measured,
         "blockers": list(status.blockers),
         "warnings": list(status.warnings),
     }
