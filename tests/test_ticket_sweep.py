@@ -28,6 +28,13 @@ from skt import ticket as ticket_mod  # noqa: E402
 from test_check import GIT  # noqa: E402
 from test_status import make_home, make_repo  # noqa: E402
 
+#: Captured BEFORE the `isolate` fixture below replaces `shutil.which`
+#: with a stub. The real-binary tests at the bottom need the real one;
+#: every other test needs it gone, because `resolve_gate_cli` falls back
+#: to PATH by design and a developer's own skill-manager must never be
+#: the CLI a stubbed gate runs.
+_REAL_WHICH = shutil.which
+
 
 @pytest.fixture(autouse=True)
 def isolate(tmp_path, monkeypatch):
@@ -262,7 +269,7 @@ def test_dirty_worktree_is_skipped_not_removed(tmp_path, capsys):
     repo = epic_repo(tmp_path)
     dirty = add_worktree(repo, "T-2", dirty=True)
 
-    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 0
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 4
     out = capsys.readouterr().out
     assert "SKIPPED" in out
     assert "uncommitted path(s)" in out
@@ -275,7 +282,7 @@ def test_unpushed_commits_are_skipped(tmp_path, capsys):
     repo = epic_repo(tmp_path)
     path = add_worktree(repo, "T-3", commit=True)
 
-    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 0
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 4
     out = capsys.readouterr().out
     assert "not pushed to" in out
     assert path.is_dir()
@@ -286,7 +293,7 @@ def test_commits_not_contained_in_the_epic_branch_are_skipped(tmp_path, capsys):
     repo = epic_repo(tmp_path)
     path = add_worktree(repo, "T-4", commit=True, push=True)
 
-    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 0
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 4
     out = capsys.readouterr().out
     assert "not pushed to" not in out
     assert "not contained in epic/demo" in out
@@ -310,7 +317,7 @@ def test_a_stash_is_attributed_to_the_worktree_that_made_it(tmp_path, capsys):
     ).stdout
     assert "feature/T-5" in listed
 
-    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 0
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 4
     out = capsys.readouterr().out
     assert "stash entr" in out
     assert stashed.is_dir(), "the worktree that made the stash is skipped"
@@ -341,7 +348,7 @@ def test_the_safety_gate_is_re_run_immediately_before_each_removal(tmp_path, cap
 
     sweep_mod.inspect = inspect_then_dirty
     try:
-        assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 0
+        assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 4
     finally:
         sweep_mod.inspect = real_inspect
 
@@ -417,7 +424,7 @@ def test_a_gate_refusal_skips_and_prints_the_clis_own_remedy(tmp_path, capsys):
     repo = epic_repo(tmp_path, verdict=BLOCKED_VERDICT, exit_code=1)
     path = add_worktree(repo, "T-12")
 
-    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 0
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 4
     out = capsys.readouterr().out
     assert "the home gate refused" in out
     assert "skill-manager unit publish alpha --ticket T-1" in out, "verbatim, not re-derived"
@@ -458,7 +465,7 @@ def test_a_verdict_that_says_unsafe_at_exit_0_still_skips(tmp_path, capsys):
     repo = epic_repo(tmp_path, verdict='{"safe": false, "blockers": [], "units": []}', exit_code=0)
     path = add_worktree(repo, "T-13b")
 
-    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 0
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 4
     assert "the home gate refused" in capsys.readouterr().out
     assert path.is_dir()
 
@@ -548,7 +555,7 @@ def test_sweep_json_summary_and_space_keys(tmp_path, capsys):
     add_worktree(repo, "T-20")
     add_worktree(repo, "T-21", dirty=True)
 
-    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True, as_json=True) == 0
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True, as_json=True) == 4
     payload = json.loads(capsys.readouterr().out)
     assert payload["summary"]["removed"] == 1
     assert payload["summary"]["skipped"] == 1
@@ -556,7 +563,7 @@ def test_sweep_json_summary_and_space_keys(tmp_path, capsys):
     assert payload["pruned"] is True
     assert payload["free_bytes_delta"] is not None
     assert "du" in payload["size_note"]
-    assert payload["exit_code"] == 0
+    assert payload["exit_code"] == 4
 
 
 def test_free_space_is_measured_not_computed_from_du(tmp_path):
@@ -632,23 +639,58 @@ def test_an_unknown_epic_is_refused_rather_than_silently_widened(tmp_path, capsy
     assert "git fetch origin" in out
 
 
-def test_no_target_branch_warns_that_containment_was_not_checked(tmp_path, capsys):
-    """A repo with no epic branch still sweeps — and says what it did not check."""
-    repo = epic_repo(tmp_path, epic=False)
-    path = add_worktree(repo, "X-1", base="main")
+def test_an_uncheckable_containment_refuses_rather_than_warning(tmp_path, capsys):
+    """The hard stop git-epic-workflow §5 promises, actually enforced.
 
-    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 0
+    This inverts `test_no_target_branch_warns_that_containment_was_not_
+    checked`, which pinned the old behaviour deliberately. It was wrong:
+    §5 (`worktree-lifecycle.md:301-305`) makes epic-unmerged work a hard
+    stop BEFORE any removal, and a stop that only happens when somebody
+    remembered `--epic` is not one. In a repository where no single
+    `epic/*` is discoverable, the shipped warning let a bare
+    `skt ticket sweep --yes` remove worktrees whose commits were pushed
+    and merged nowhere — while every OTHER evidence gap in this module
+    fails closed. "Containment was not checked" is an evidence gap.
+    """
+    repo = epic_repo(tmp_path, epic=False)
+    path = add_worktree(repo, "X-1", base="main", commit=True, push=True)
+
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 4
     out = capsys.readouterr().out
-    assert "containment NOT checked" in out
-    assert "no epic/target branch known" in out
-    assert not path.is_dir(), "the gap is reported, not treated as a blocker"
+    assert "containment is UNCHECKABLE" in out
+    assert "--epic <slug> or --target <ref>" in out, "the refusal names its own remedy"
+    assert "SKIPPED" in out
+    assert path.is_dir(), "pushed-but-merged-nowhere is exactly the case that must survive"
+    assert not repo["log"].exists(), "and the gate is never even asked about it"
+
+
+def test_naming_a_target_lifts_the_uncheckable_containment_refusal(tmp_path, capsys):
+    """The refusal above is not a dead end: it is answerable with a flag."""
+    repo = epic_repo(tmp_path, epic=False)
+    path = add_worktree(repo, "X-2", base="main")
+
+    assert ticket_mod.run("sweep", None, start=repo["root"], target="main", yes=True) == 0
+    assert not path.is_dir()
+
+
+def test_list_shows_the_uncheckable_containment_as_a_blocker(tmp_path, capsys):
+    repo = epic_repo(tmp_path, epic=False)
+    add_worktree(repo, "X-3", base="main")
+
+    assert ticket_mod.run("list", None, start=repo["root"]) == 0
+    out = capsys.readouterr().out
+    assert "every worktree is REFUSED" in out
+    assert "BLOCKED containment is UNCHECKABLE" in out
+    assert "0 with no blocker" in out
 
 
 def test_a_repo_with_no_remote_reports_rather_than_enforces_pushed(tmp_path, capsys):
     """"Unpushed" is a question with no meaning where there is no remote.
 
-    And the branch ref outlives the worktree either way, so enforcing it
-    there would refuse every sweep in a local-only repo for nothing.
+    And on a BRANCH the ref outlives the worktree either way, so
+    enforcing it there would refuse every sweep in a local-only repo for
+    nothing. `--target` is passed because containment is a separate gate
+    and an uncheckable one now refuses on its own.
     """
     root = make_repo(tmp_path / "local-only")
     (root / ".gitignore").write_text(".skill-manager/\n")
@@ -660,9 +702,10 @@ def test_a_repo_with_no_remote_reports_rather_than_enforces_pushed(tmp_path, cap
     git("worktree", "add", "-q", str(path), "-b", "feature/L-1", "main", cwd=root)
     (path / ".skill-manager" / "installed").mkdir(parents=True)
 
-    assert ticket_mod.run("sweep", None, start=root, yes=True) == 0
+    assert ticket_mod.run("sweep", None, start=root, target="main", yes=True) == 0
     out = capsys.readouterr().out
     assert "has no remote" in out
+    assert "its branch ref outlives the worktree" in out
     assert not path.is_dir()
 
 
@@ -707,3 +750,402 @@ def test_the_cli_exposes_both_verbs(tmp_path):
     assert proc.returncode == 0
     assert "list" in proc.stdout and "sweep" in proc.stdout
     assert "--epic" in proc.stdout and "--yes" in proc.stdout and "--into" in proc.stdout
+
+
+# ------------------------------------------------- evidence gaps fail closed
+
+
+def test_a_failed_remote_probe_blocks_instead_of_disabling_the_unpushed_gate(
+    tmp_path, capsys, monkeypatch
+):
+    """`""` and None are different answers; `bool()` collapsed them.
+
+    `remotes = bool(_out("remote", ...))` read a FAILED probe as "this
+    repository has no remote", which is the one value that switches the
+    unpushed-commits gate off. It was the only place in this module where
+    an evidence gap did not fail closed — the ARTI-28 defect class (an
+    "absent and unreadable are the same false" probe), found the same day
+    in `ArtifactPrune`, `ChildHomeRegistry` and `ServersDown`.
+    """
+    repo = epic_repo(tmp_path)
+    # Contained in the ref it is checked against, so `unpushed` is the
+    # only thing left that can block it.
+    path = add_worktree(repo, "R-1", commit=True)
+    real_out = sweep_mod._out
+
+    def out_but_remote_probe_fails(*args, **kwargs):
+        if args == ("remote",):
+            return None  # the probe did not run — NOT "there are none"
+        return real_out(*args, **kwargs)
+
+    monkeypatch.setattr(sweep_mod, "_out", out_but_remote_probe_fails)
+
+    assert ticket_mod.run(
+        "sweep", None, start=repo["root"], target="feature/R-1", yes=True
+    ) == 4
+    out = capsys.readouterr().out
+    assert "could not determine whether this repository has any remote" in out
+    assert path.is_dir(), "an unreadable probe must never read as `nothing to worry about`"
+
+
+def test_a_detached_head_with_local_commits_is_refused_even_with_no_remote(
+    tmp_path, capsys
+):
+    """The `remotes=False` note promised a branch ref a detached HEAD has not.
+
+    On a branch, `unpushed` is a workflow gate: the ref outlives the
+    worktree. Detached, nothing references the tip once the directory is
+    gone but the reflog, so the same fact is data loss — and it must hold
+    where `remotes` is False, which is precisely where the old warning
+    said the opposite out loud.
+    """
+    root = make_repo(tmp_path / "local-only-detached")
+    (root / ".gitignore").write_text(".skill-manager/\n")
+    git("add", "-A", cwd=root)
+    git("commit", "-q", "-m", "ignore the home", cwd=root)
+    home = make_home(root, units={})
+    gate_cli(home)
+    path = root.parent / "wt-detached"
+    git("worktree", "add", "-q", "--detach", str(path), "main", cwd=root)
+    (path / ".skill-manager" / "installed").mkdir(parents=True)
+    (path / "work.txt").write_text("only here\n")
+    git("add", "-A", cwd=path)
+    git("commit", "-q", "-m", "detached work", cwd=path)
+
+    assert ticket_mod.run("sweep", None, start=root, target="main", yes=True) == 4
+    out = capsys.readouterr().out
+    assert "DETACHED HEAD" in out
+    assert "no ref will outlive this worktree" in out
+    assert "its branch ref outlives the worktree" not in out, \
+        "the no-remote note must not promise a ref that does not exist"
+    assert path.is_dir()
+
+
+def test_the_no_remote_note_tells_a_detached_worktree_the_truth(tmp_path):
+    """The warning itself, without the blocker in the way."""
+    branchy = sweep_mod.Status(remotes=False, target="main", detached=False)
+    detached = sweep_mod.Status(remotes=False, target="main", detached=True)
+    assert "its branch ref outlives the worktree" in branchy.warnings[0]
+    assert "no ref outlives it" in detached.warnings[0]
+
+
+# -------------------------------------------------------- the removal window
+
+
+def test_a_commit_made_while_the_gate_ran_is_caught_before_removal(tmp_path, capsys):
+    """`inspect` → gate → `inspect` → remove, and the LAST one decides.
+
+    The gate is allowed `GATE_TIMEOUT_SECONDS` (180) and is the slow step
+    by an order of magnitude, so a git answer taken before it can be
+    three minutes old at removal time. `git worktree remove` refuses a
+    dirty tree on its own, so what actually slipped through the old
+    `inspect → gate → remove` order was a new COMMIT — which leaves the
+    tree clean and the commit unpushed. This gate CLI makes one while it
+    "runs".
+    """
+    repo = epic_repo(tmp_path)
+    path = add_worktree(repo, "T-27")
+    cli = repo["home"] / "bin" / "cli" / "skill-manager"
+    cli.write_text(
+        "#!/usr/bin/env bash\n"
+        'case "$*" in *--help*) echo "      --into=<into>   The project home"; exit 0;; esac\n'
+        f'printf "mid-gate\\n" > "{path}/mid.txt"\n'
+        f'git -C "{path}" add -A\n'
+        f'git -C "{path}" -c user.email=t@t -c user.name=t commit -q -m "landed mid-gate"\n'
+        f"cat <<'VERDICT'\n{CLEAN_VERDICT}\nVERDICT\n"
+    )
+    cli.chmod(cli.stat().st_mode | stat.S_IEXEC)
+
+    real_inspect = sweep_mod.inspect
+    calls: list[str] = []
+
+    def counting(wt, *, root, target):
+        calls.append(str(wt.path))
+        return real_inspect(wt, root=root, target=target)
+
+    sweep_mod.inspect = counting
+    try:
+        assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 4
+    finally:
+        sweep_mod.inspect = real_inspect
+
+    out = capsys.readouterr().out
+    assert len(calls) == 3, f"plan, pre-filter, and AFTER the gate: {calls}"
+    assert "SKIPPED" in out
+    assert "not pushed to" in out or "not contained in" in out
+    assert path.is_dir(), "the commit that landed during the gate keeps its worktree"
+
+
+def test_a_blocked_worktree_still_does_not_pay_for_the_gate(tmp_path, capsys):
+    """The pre-filter earns its place: a two-home compare per worktree."""
+    repo = epic_repo(tmp_path)
+    add_worktree(repo, "T-28", dirty=True)
+
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 4
+    assert not repo["log"].exists()
+
+
+# ------------------------------------------------------- what git cannot see
+
+
+def test_gitignored_paths_other_than_the_home_are_reported_before_deletion(
+    tmp_path, capsys
+):
+    """`.skill-manager` is not the only invisible thing a removal deletes.
+
+    `git status --porcelain` does not report ignored paths and
+    `git worktree remove` deletes them without `--force`, so `.env`,
+    `.venv` and local scratch go the same way as the home did — with no
+    gate and, until now, no mention. A WARNING, not a blocker: most
+    ignored content is disposable and a gate that always fires gets
+    turned off.
+    """
+    repo = epic_repo(tmp_path)
+    (repo["root"] / ".gitignore").write_text(".skill-manager/\n.env\nscratch/\n")
+    git("add", "-A", cwd=repo["root"])
+    git("commit", "-q", "-m", "ignore more", cwd=repo["root"])
+    # onto the epic branch too, so the worktree below both inherits the
+    # rules and stays contained in its target
+    git("branch", "-f", "epic/demo", "main", cwd=repo["root"])
+    git("push", "-q", "-f", "origin", "epic/demo", cwd=repo["root"])
+    path = add_worktree(repo, "T-29")
+    (path / ".env").write_text("TOKEN=hunter2\n")
+    (path / "scratch").mkdir()
+    (path / "scratch" / "notes.md").write_text("local\n")
+
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 0
+    out = capsys.readouterr().out
+    assert "gitignored path(s) will be DELETED" in out
+    assert ".env" in out
+    assert "scratch/" in out
+    assert ".skill-manager" not in out.split("gitignored path(s)")[1].split("\n")[0], \
+        "the home has its own gate and is not double-counted here"
+    assert not path.is_dir(), "reported, not refused"
+
+
+def test_the_ignored_listing_is_a_warning_even_when_it_cannot_be_read(tmp_path):
+    status = sweep_mod.Status(target="main", ignored_measured=False)
+    assert status.clean, "an unreadable ignore listing is not a refusal"
+    assert "could not list gitignored paths" in status.warnings[0]
+
+
+# --------------------------------------------------------- the --into guard
+
+
+def test_into_may_not_name_a_worktrees_own_home(tmp_path, capsys):
+    """The self-comparison trap, re-entered through the front door.
+
+    The default destination is derived from the PRIMARY checkout for
+    exactly one reason: a close-out gate whose `--home` and `--into` are
+    the same directory compares a home against itself and reports clean
+    for everything. `--into` could name that directory by hand.
+    """
+    repo = epic_repo(tmp_path)
+    victim = add_worktree(repo, "T-30")
+
+    assert ticket_mod.run(
+        "sweep", None, start=repo["root"], into=str(victim / ".skill-manager"), yes=True
+    ) == 1
+    out = capsys.readouterr().out
+    assert "belongs to the worktree" in out
+    assert "compares it against itself" in out
+    assert str(repo["home"]) in out, "and it names the destination that is correct"
+    assert victim.is_dir()
+    assert not repo["log"].exists(), "refused before the gate, so before any removal"
+
+
+@pytest.mark.parametrize("suffix", [(), ("nested", "home"), (".skill-manager", "x")])
+def test_into_may_not_name_anything_inside_a_sweepable_worktree(tmp_path, capsys, suffix):
+    """Including the worktree directory itself — which is also the path
+    `git worktree remove` takes, i.e. the `not_a_home` trap's twin."""
+    repo = epic_repo(tmp_path)
+    victim = add_worktree(repo, "T-31")
+
+    assert ticket_mod.run(
+        "sweep", None, start=repo["root"], into=str(victim.joinpath(*suffix)), yes=True
+    ) == 1
+    assert "belongs to the worktree" in capsys.readouterr().out
+    assert victim.is_dir()
+
+
+# ------------------------------------------------------------- the exit code
+
+
+def test_a_refused_pass_exits_4_and_a_complete_one_exits_0(tmp_path, capsys):
+    """`0 removed, N skipped` at exit 0 reads exactly like "nothing to do".
+
+    `skt ticket close` already returns 4 when this same gate refuses this
+    same teardown; the fleet verb returning 0 for the identical event is
+    the divergence. A skip is not a FAILURE (1) — it is an outstanding
+    action with a printed remedy, which is what this repository's `check`
+    and `publish --check` spend a distinct non-zero code on.
+    """
+    repo = epic_repo(tmp_path)
+    blocked = add_worktree(repo, "T-32", dirty=True)
+    fine = add_worktree(repo, "T-33")
+
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 4
+    out = capsys.readouterr().out
+    assert "1 removed, 1 skipped for safety" in out
+    assert f"exits {sweep_mod.EXIT_SKIPPED_FOR_SAFETY}" in out
+    assert "skt ticket close" in out, "the divergence it is being aligned with"
+    assert blocked.is_dir() and not fine.is_dir()
+
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 4
+    capsys.readouterr()
+    shutil.rmtree(blocked)
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 0, \
+        "nothing left to refuse"
+
+
+def test_a_dry_run_stays_0_even_with_blocked_worktrees(tmp_path, capsys):
+    """A plan makes no claim to have acted, and says so twice in its output."""
+    repo = epic_repo(tmp_path)
+    add_worktree(repo, "T-34", dirty=True)
+
+    assert ticket_mod.run("sweep", None, start=repo["root"]) == 0
+    out = capsys.readouterr().out
+    assert "(dry run)" in out and "NOTHING was removed" in out
+
+
+def test_a_failure_outranks_a_skip_in_the_exit_code(tmp_path, capsys):
+    """1 means something BROKE, and that has to survive a skip beside it."""
+    repo = epic_repo(tmp_path, verdict=NOT_A_HOME_VERDICT, exit_code=2)
+    add_worktree(repo, "T-35")
+    add_worktree(repo, "T-36", dirty=True)
+
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 1
+    out = capsys.readouterr().out
+    assert "1 failed" in out and "1 skipped for safety" in out
+
+
+# ------------------------------------------- the gate, against a real binary
+
+
+def _real_skill_manager():
+    """A REAL `skill-manager`, or a loud skip. (path, version).
+
+    Everything above stubs the gate with a bash script echoing a canned
+    verdict, which proves the WIRING and not that a real
+    `home close-out` produces that payload for a home holding an
+    unpublished edit. That is the central safety claim of this command,
+    so it needs at least one test that asks the actual program.
+
+    The awkward part, stated rather than hidden: the binary this was
+    written against is 0.23.0, which predates the `home close-out` fix in
+    0.24.0. So the homes below are built to be UNAMBIGUOUS on both
+    builds — a unit whose content differs between the worktree home and
+    the destination is work that exists in only one place, which
+    `HomeCloseOut` blocks on by construction ("a unit the project home
+    does not have, or has an older copy of", and "a unit both sides
+    changed that a three-way merge *can* fold together — can, not has").
+    Measured on 0.23.0: `safe:false`, exit 1, one `skill:alpha` blocker.
+    Measured on the same binary for byte-identical homes: `safe:true`,
+    exit 0, `status:"unchanged"`. Neither answer depends on the fix.
+
+    A silently-skipped safety test is worse than none, so the skip
+    reason is PRINTED as well as recorded — CI has no skill-manager and
+    will skip both of these every run.
+    """
+    found = _REAL_WHICH("skill-manager")
+    if found is None:
+        return _skip_real_gate(
+            "no `skill-manager` on PATH, so the home gate was exercised only "
+            "against the bash stub"
+        )
+    cli = Path(found)
+    version = subprocess.run(
+        [str(cli), "--version"], capture_output=True, text=True
+    ).stdout.splitlines()
+    version = version[0].strip() if version else "unknown"
+    if not sweep_mod.cli_has_close_out(cli):
+        return _skip_real_gate(
+            f"{cli} ({version}) has no `home close-out --into`, so it predates the "
+            "gate entirely"
+        )
+    return cli, version
+
+
+def _skip_real_gate(reason: str):
+    message = f"(skipped: {reason})"
+    print(message)
+    pytest.skip(message)
+
+
+def _real_home(home: Path, skill_body: str) -> Path:
+    """A home a real skill-manager will read: policy, runtime, one unit."""
+    (home / "installed").mkdir(parents=True, exist_ok=True)
+    (home / "home.runtime.json").write_text("{}")
+    (home / "home.policy.toml").write_text('policy = "live"\n')
+    (home / "skills" / "alpha").mkdir(parents=True, exist_ok=True)
+    (home / "skills" / "alpha" / "SKILL.md").write_text(skill_body)
+    (home / "installed" / "alpha.json").write_text(
+        json.dumps(
+            {
+                "name": "alpha",
+                "version": "1.0.0",
+                "unitKind": "SKILL",
+                "origin": "https://github.com/x/alpha",
+                "gitHash": "a" * 40,
+                "gitRef": "main",
+            }
+        )
+    )
+    return home
+
+
+PUBLISHED = "---\nname: alpha\n---\nthe published body\n"
+EDITED = "---\nname: alpha\n---\nthe published body\nAN EDIT THAT REACHED NO REPOSITORY\n"
+
+
+def _real_gate_repo(tmp_path, cli: Path, worktree_body: str) -> tuple[dict, Path]:
+    repo = epic_repo(tmp_path)
+    pin = repo["home"] / "bin" / "cli" / "skill-manager"
+    pin.unlink()
+    pin.symlink_to(cli)
+    _real_home(repo["home"], PUBLISHED)
+    path = add_worktree(repo, "REAL-1")
+    _real_home(path / ".skill-manager", worktree_body)
+    return repo, path
+
+
+def test_a_real_home_close_out_refuses_a_worktree_holding_an_unpublished_edit(
+    tmp_path, capsys
+):
+    """The claim the whole command rests on, asked of the shipped program.
+
+    Not a stub echoing `BLOCKED_VERDICT`: a real
+    `skill-manager home close-out --home <worktree>/.skill-manager --into
+    <primary>/.skill-manager --json`, over a real home whose copy of a
+    skill differs from the destination's. See `_real_skill_manager` for
+    why that construction is unambiguous on 0.23.0 and 0.24.0 alike.
+    """
+    cli, version = _real_skill_manager()
+    repo, path = _real_gate_repo(tmp_path, cli, EDITED)
+
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True, as_json=True) == 4
+    payload = json.loads(capsys.readouterr().out)
+    step = next(s for s in payload["steps"] if s["action"] != "excluded")
+    assert step["action"] == "skipped", f"{version} verdict: {step}"
+    assert "the home gate refused" in step["reasons"][0]
+    assert any("alpha" in reason for reason in step["reasons"]), \
+        f"the real CLI names the unit it is refusing over; got {step['reasons']}"
+    assert path.is_dir(), "an unpublished skill edit keeps its worktree, for real"
+
+
+def test_a_real_home_close_out_lets_a_worktree_with_nothing_to_lose_go(
+    tmp_path, capsys
+):
+    """The other half, or the test above proves only that it refuses always.
+
+    A gate that refuses everything — which is exactly what the 0.23.0
+    `home close-out` bug did to real cloned homes — passes the refusal
+    test for the wrong reason. So the same real binary is asked about a
+    worktree home byte-identical to the destination, and has to say yes.
+    """
+    cli, version = _real_skill_manager()
+    repo, path = _real_gate_repo(tmp_path, cli, PUBLISHED)
+
+    assert ticket_mod.run("sweep", None, start=repo["root"], yes=True) == 0, version
+    assert "1 removed" in capsys.readouterr().out
+    assert not path.is_dir()
