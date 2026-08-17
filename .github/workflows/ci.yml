@@ -72,8 +72,13 @@ jobs:
           git config --global user.name "skt CI"
           git config --global init.defaultBranch main
 
+      # `-rs` is not cosmetic. The two `home close-out` tests that run the
+      # REAL skill-manager binary skip on a runner that has none — which is
+      # every runner — and a safety test that skips SILENTLY is worse than
+      # one that does not exist, because the count still reads green. `-rs`
+      # is what puts each skip's stated reason in the log.
       - name: Run the suite
-        run: uv run --python ${{ matrix.python-version }} --with pytest pytest tests -q
+        run: uv run --python ${{ matrix.python-version }} --with pytest pytest tests -q -rs
 
   units:
     name: unit manifests and frontmatter
