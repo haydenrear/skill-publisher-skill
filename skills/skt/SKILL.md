@@ -78,26 +78,53 @@ loss appears in no diff, no PR and no fan-out.
 ```bash
 skt ticket list                       # read-only: what is standing, and what blocks it
 skt ticket sweep                      # the plan. Changes NOTHING without --yes
-skt ticket sweep --yes                # retire every worktree that passes its own gate
-skt ticket sweep --epic <slug> --yes  # one epic's worktrees only
+skt ticket sweep --epic <slug> --yes  # retire that epic's worktrees
 ```
 
-Run it **from the primary checkout**. `sweep` refuses the worktree it is
-running in and never touches the primary.
+**Pass `--epic <slug>` (or `--target <ref>`) whenever you arm it.**
+Containment against the epic branch is the check that says a ticket
+actually landed, and with no epic/target branch known it cannot be made
+at all — so a bare `skt ticket sweep --yes` in a repository where no
+single `epic/*` is discoverable **refuses every worktree** rather than
+removing work that is pushed but merged nowhere. That is
+git-epic-workflow's worktree-lifecycle §5 hard stop, enforced instead of
+warned about.
 
-Each worktree is measured *again* immediately before it is removed, and
-any one of these makes it **skipped, not removed** — reported, with the
-pass carrying on:
+Run it **from the primary checkout**. `sweep` refuses the worktree it is
+running in and never touches the primary. `-y/--yes` is the **arm
+switch** here — unlike `skt build -y`, which only suppresses a
+confirmation prompt on a command that was going to act anyway.
+
+The order per worktree is **inspect → home gate → inspect → remove**:
+the gate takes up to three minutes, so the git answer that decides is
+the one taken *after* it. Any one of these makes a worktree **skipped,
+not removed** — reported, with the pass carrying on:
 
 - uncommitted changes, or a stash entry made on that worktree's branch;
-- commits not pushed, or not contained in the epic/target branch;
+- commits not pushed, or not contained in the epic/target branch — or
+  commits on a **detached HEAD**, where no ref outlives the worktree at
+  all, which blocks even in a repository with no remote;
+- no epic/target branch to check containment against (above);
+- any probe that could not run — including `git remote` itself;
 - a non-clean `skill-manager home close-out --home <worktree-home>
   --into <primary-home>` verdict — the same gate `skt ticket close` runs.
 
+`--into` may not name a home inside a worktree the sweep could remove:
+a gate whose `--home` and `--into` are the same home calls every unit
+clean. That is refused.
+
+Gitignored paths other than the home (`.env`, `.venv`, scratch) are
+listed as a **warning**: `git worktree remove` deletes them without
+`--force` and no diff will ever show it. They are not a blocker — most
+ignored content is disposable and a gate that always fires gets turned
+off.
+
 Removal is `git worktree remove`; `--force` is never passed. Exit `0`
-means the pass completed (skips included — a skip is the gate working),
-`1` means something failed, `9` means the destination home is `frozen`
-and the pass was abandoned.
+means every sweepable worktree was retired (a dry run is 0 too), `4`
+means the armed pass completed but a gate **refused** at least one
+worktree — the same code `skt ticket close` returns when the same gate
+refuses — `1` means something failed, `9` means the destination home is
+`frozen` and the pass was abandoned.
 
 The summary reports a **free-space delta**, measured with `statvfs`
 before and after, and no per-worktree size. These homes are cloned
