@@ -1,6 +1,6 @@
 ---
 name: skt
-description: 'Skill-lifecycle orientation and change management for skill-manager homes, via the `skt` CLI. Use at SESSION START to learn what is loaded and where you are standing — which skill-manager skills and plugins are installed, which support change management, which have a NEW VERSION AVAILABLE and how to pull/sync them, which home tier this session writes (root ~/.skill-manager, project <repo>/.skill-manager, or a ticket worktree home), and whether you are inside an epic, a ticket, or an active spec workflow. Use whenever you edited a skill in your home and need it to survive — sync it up a tier, publish it to its own repo — or see "please sync with root to publish changes globally". Use for the worktree ticket lifecycle: `skt ticket new/close` creates and tears down a ticket worktree WITH its own Skill Manager home. Trigger on: "what skills are loaded", "am I in a ticket/epic", "update this skill", "new version", "sync skills", "publish my skill edit", "start/finish a ticket", session startup orientation.'
+description: 'Skill-lifecycle orientation and change management for skill-manager homes, via the `skt` CLI. Use at SESSION START to learn what is loaded and where you are standing — which skill-manager skills and plugins are installed, which support change management, which have a NEW VERSION AVAILABLE and how to pull/sync them, which home tier this session writes (root ~/.skill-manager, project <repo>/.skill-manager, or a ticket worktree home), and whether you are inside an epic, a ticket, or an active spec workflow. Use whenever you edited a skill in your home and need it to survive — sync it up a tier, publish it to its own repo — or see "please sync with root to publish changes globally". Use for the worktree ticket lifecycle: `skt ticket new/close` creates and tears down a ticket worktree WITH its own Skill Manager home, and `skt ticket list/sweep` enumerates the ticket worktrees of an epic and retires them in one safety-gated pass instead of a hand-rolled `git worktree remove --force` loop. Trigger on: "what skills are loaded", "am I in a ticket/epic", "update this skill", "new version", "sync skills", "publish my skill edit", "start/finish a ticket", "clean up/retire/sweep worktrees", "reclaim disk space from worktrees", session startup orientation.'
 ---
 
 # skt
@@ -15,6 +15,8 @@ skt check             # new-version-available, recorded unit errors, stale artif
 skt sync <unit>       # pull a unit to its latest pushed source
 skt ticket new <T>    # ticket worktree + its own Skill Manager home, one command
 skt ticket close <T>  # teardown through the close-out gate
+skt ticket list       # every ticket worktree here, and what blocks retiring it
+skt ticket sweep      # retire many at once — dry run unless you pass --yes
 skt publish [<unit>]  # a home-edited skill -> up one tier -> its own git repo
 ```
 
@@ -64,6 +66,44 @@ installed:
 ```bash
 "${SKILL_MANAGER_HOME:-$HOME/.skill-manager}/skills/git-issue-workflow/scripts/wt" new <TICKET>
 ```
+
+## Retiring an epic's worktrees at the end: `list` and `sweep`
+
+An epic keeps every ticket worktree standing until integration is done
+and then retires them all at once. **Do not hand-loop
+`git worktree remove --force`** — that is `rm -rf` with extra steps: it
+deletes each worktree's Skill Manager home, which is gitignored, so the
+loss appears in no diff, no PR and no fan-out.
+
+```bash
+skt ticket list                       # read-only: what is standing, and what blocks it
+skt ticket sweep                      # the plan. Changes NOTHING without --yes
+skt ticket sweep --yes                # retire every worktree that passes its own gate
+skt ticket sweep --epic <slug> --yes  # one epic's worktrees only
+```
+
+Run it **from the primary checkout**. `sweep` refuses the worktree it is
+running in and never touches the primary.
+
+Each worktree is measured *again* immediately before it is removed, and
+any one of these makes it **skipped, not removed** — reported, with the
+pass carrying on:
+
+- uncommitted changes, or a stash entry made on that worktree's branch;
+- commits not pushed, or not contained in the epic/target branch;
+- a non-clean `skill-manager home close-out --home <worktree-home>
+  --into <primary-home>` verdict — the same gate `skt ticket close` runs.
+
+Removal is `git worktree remove`; `--force` is never passed. Exit `0`
+means the pass completed (skips included — a skip is the gate working),
+`1` means something failed, `9` means the destination home is `frozen`
+and the pass was abandoned.
+
+The summary reports a **free-space delta**, measured with `statvfs`
+before and after, and no per-worktree size. These homes are cloned
+copy-on-write, so `du` bills every shared block to every copy and
+over-reports by roughly 30x — a home `du` called 1.1 GB cost 33.7 MB of
+real space.
 
 ## The three-tier home model, in one table
 

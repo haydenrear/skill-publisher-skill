@@ -129,30 +129,42 @@ _TICKET_RE = re.compile(r"^feature/(.+)$")
 _EPIC_RE = re.compile(r"^epic/(.+)$")
 
 
+def parse_ticket_plan(text: str) -> tuple[str | None, list[str], list[str]]:
+    """(workflow name, open ticket ids, ALL ticket ids) from a plan's TEXT.
+
+    Split out from :func:`spec_workflow` so a caller holding the plan's
+    bytes can parse them without a file on disk — `skt ticket sweep`
+    reads the plan out of the epic BRANCH (`git show <ref>:<path>`),
+    because the primary checkout running the sweep is usually on `main`.
+    """
+    name = None
+    open_tickets: list[str] = []
+    all_tickets: list[str] = []
+    current_id = None
+    for line in text.splitlines():
+        if name is None and re.match(r"^name:\s*\S", line):
+            name = line.split(":", 1)[1].strip().strip("'\"")
+        m = re.match(r"^\s*-\s*id:\s*(\S+)", line)
+        if m:
+            current_id = m.group(1).strip("'\"")
+            all_tickets.append(current_id)
+        m = re.match(r"^\s*status:\s*(\S+)", line)
+        if m and current_id and m.group(1).strip("'\"").lower() in ("open", "in_progress"):
+            open_tickets.append(current_id)
+            current_id = None
+    return name or "(unnamed)", open_tickets, all_tickets
+
+
 def spec_workflow(root: Path) -> tuple[str | None, list[str], list[str]]:
     """(workflow name, open ticket ids, ALL ticket ids) from ticket_plan.yaml."""
     plan = root / "specs" / "desired_program_model" / "ticket_plan.yaml"
     if not plan.is_file():
         return None, [], []
-    name = None
-    open_tickets: list[str] = []
-    all_tickets: list[str] = []
-    current_id = None
     try:
-        for line in plan.read_text().splitlines():
-            if name is None and re.match(r"^name:\s*\S", line):
-                name = line.split(":", 1)[1].strip().strip("'\"")
-            m = re.match(r"^\s*-\s*id:\s*(\S+)", line)
-            if m:
-                current_id = m.group(1).strip("'\"")
-                all_tickets.append(current_id)
-            m = re.match(r"^\s*status:\s*(\S+)", line)
-            if m and current_id and m.group(1).strip("'\"").lower() in ("open", "in_progress"):
-                open_tickets.append(current_id)
-                current_id = None
+        text = plan.read_text()
     except OSError:
         return None, [], []
-    return name or "(unnamed)", open_tickets, all_tickets
+    return parse_ticket_plan(text)
 
 
 def gather(start: str | Path, home: Path) -> TicketContext:
