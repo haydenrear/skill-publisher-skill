@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 # Subcommand -> (implementing ticket, issue URL) for honest stubs.
 # Empty since SKT-5; kept for future subcommands landing across tickets.
@@ -63,9 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("unit", nargs="?")
 
     ticket = sub.add_parser(
-        "ticket", help="worktree lifecycle: new/close/info via git-issue-workflow"
+        "ticket",
+        help="worktree lifecycle: new/close/info via git-issue-workflow, plus "
+        "list/sweep over every ticket worktree of the repository",
     )
-    ticket.add_argument("verb", nargs="?", choices=["new", "close", "info"])
+    ticket.add_argument("verb", nargs="?", choices=["new", "close", "info", "list", "sweep"])
     ticket.add_argument("ticket_id", nargs="?")
     ticket.add_argument("--base", help="base branch for ticket new")
     ticket.add_argument(
@@ -74,6 +76,28 @@ def build_parser() -> argparse.ArgumentParser:
         "name it) with the index-base pinning conventions, instead of wt's "
         "derived path",
     )
+    ticket.add_argument(
+        "--epic",
+        help="list/sweep: limit to one epic's worktrees, by the slug in its "
+        "epic/<slug> branch. Also selects the containment target. Discovered "
+        "from the repository when there is exactly one epic branch.",
+    )
+    ticket.add_argument(
+        "--target",
+        help="list/sweep: the ref a ticket's commits must be contained in "
+        "(default: the resolved epic branch)",
+    )
+    ticket.add_argument(
+        "--into",
+        help="sweep: the destination home for the `home close-out` gate "
+        "(default: the MAIN working tree's .skill-manager)",
+    )
+    ticket.add_argument(
+        "-y", "--yes", action="store_true",
+        help="sweep: actually remove. Without it the sweep is a dry run that "
+        "prints the plan and changes nothing.",
+    )
+    ticket.add_argument("--json", action="store_true", help="list/sweep: machine-readable output")
 
     build_cmd = sub.add_parser(
         "build",
@@ -141,7 +165,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "sync":
         return _import_sibling("sync").run(args.unit)
     if args.command == "ticket":
-        return _import_sibling("ticket").run(args.verb, args.ticket_id, base=args.base, path=args.path)
+        return _import_sibling("ticket").run(
+            args.verb,
+            args.ticket_id,
+            base=args.base,
+            path=args.path,
+            epic=args.epic,
+            target=args.target,
+            into=args.into,
+            yes=args.yes,
+            as_json=args.json,
+        )
     if args.command == "build":
         return _import_sibling("build_cmd").run(
             args.artifacts,

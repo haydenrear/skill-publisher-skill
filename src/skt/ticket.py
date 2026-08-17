@@ -4,6 +4,13 @@ skt does not reimplement or shell out to the `wt` path by hand: it
 imports the typed Python surface that git-issue-workflow registers
 (SKT-2) and adds skt's framing — orientation after `new`, guided
 remedies on a refused `close`.
+
+`list` and `sweep` are the FLEET verbs and live in :mod:`skt.sweep`.
+They take no TICKET, they do not go through `wt` — an epic retires a
+dozen worktrees at once and `wt close` resolves exactly one ticket by
+search — and `list` in particular must work in a repository where
+git-issue-workflow is not importable at all, since answering "what is
+still standing here?" is how an operator finds out what is wrong.
 """
 
 from __future__ import annotations
@@ -224,9 +231,52 @@ def epic_new(ticket_id: str, base: str | None, path: str) -> int:
     return 0
 
 
-def run(verb: str | None, ticket_id: str | None, base: str | None = None, path: str | None = None) -> int:
+USAGE = "\n".join(
+    [
+        "usage: skt ticket new|close|info <TICKET> [--base <branch>] [--path <dir>]",
+        "       skt ticket list  [--epic <slug>] [--target <ref>] [--into <home>] [--json]",
+        "       skt ticket sweep [--epic <slug>] [--target <ref>] [--into <home>] "
+        "[-y|--yes] [--json]",
+    ]
+)
+
+#: The verbs that address the WHOLE set of ticket worktrees rather than
+#: one ticket, so they take no TICKET argument.
+FLEET_VERBS = ("list", "sweep")
+
+
+def run(
+    verb: str | None,
+    ticket_id: str | None,
+    base: str | None = None,
+    path: str | None = None,
+    *,
+    epic: str | None = None,
+    target: str | None = None,
+    into: str | None = None,
+    yes: bool = False,
+    as_json: bool = False,
+    start: str | Path = ".",
+) -> int:
+    if verb in FLEET_VERBS:
+        if ticket_id:
+            print(
+                f"skt ticket {verb}: takes no TICKET — it addresses every ticket worktree "
+                f"of this repository. Did you mean --epic {ticket_id}?",
+                file=sys.stderr,
+            )
+            return 1
+        from . import sweep as sweep_mod
+
+        if verb == "list":
+            return sweep_mod.run_list(
+                start=start, epic=epic, target=target, into=into, as_json=as_json
+            )
+        return sweep_mod.run_sweep(
+            start=start, epic=epic, target=target, into=into, yes=yes, as_json=as_json
+        )
     if not verb or not ticket_id:
-        print("usage: skt ticket new|close|info <TICKET> [--base <branch>]", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
         return 1
     if verb == "new" and path:
         return epic_new(ticket_id, base, path)
@@ -282,7 +332,10 @@ def run(verb: str | None, ticket_id: str | None, base: str | None = None, path: 
             if result.home_work:
                 print(f"home-work: {result.home_work}")
             return 0
-        print(f"skt ticket: unknown verb {verb!r} (expected new, close or info)", file=sys.stderr)
+        print(
+            f"skt ticket: unknown verb {verb!r} (expected new, close, info, list or sweep)",
+            file=sys.stderr,
+        )
         return 1
     except giw.CloseRefused as err:
         print(f"error: close refused — {err.reason}")
