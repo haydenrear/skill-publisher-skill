@@ -968,6 +968,9 @@ class SweepResult:
     free_before: int | None = None
     free_after: int | None = None
     abandoned: str = ""
+    #: Sweepable worktrees the abandoned pass never reached. Reported so a
+    #: summary after an abandonment is not silently short.
+    not_reached: int = 0
     exit_code: int = EXIT_OK
 
     @property
@@ -1042,7 +1045,8 @@ def sweep(
         return result
 
     result.free_before = _free_bytes(plan.root)
-    for candidate in plan.sweepable:
+    queue = plan.sweepable
+    for index, candidate in enumerate(queue):
         wt = candidate.worktree
         step = Step(ticket=wt.ticket, path=wt.path, branch=wt.branch, action="skipped")
         # RE-MEASURED here, immediately before this worktree is removed.
@@ -1061,6 +1065,7 @@ def sweep(
             step.fix = verdict.fix
             result.steps.append(step)
             result.abandoned = verdict.reason
+            result.not_reached = len(queue) - index - 1
             result.exit_code = EXIT_FROZEN_DESTINATION
             break
         if not verdict.clean:
@@ -1121,7 +1126,7 @@ def _label(wt_ticket: str | None) -> str:
 
 
 def _header(plan: Plan) -> list[str]:
-    """The two facts every reader has to check before trusting the rest."""
+    """The three facts a reader has to check before trusting the rest."""
     if plan.epic is None:
         epic = "epic       none discoverable"
     else:
@@ -1250,7 +1255,11 @@ def render_sweep(result: SweepResult) -> str:
         "by ~30x (a home `du` called 1.1 GB cost 33.7 MB of real space)."
     )
     if result.abandoned:
-        lines.append(f"pass ABANDONED: {result.abandoned}")
+        lines.append(
+            f"pass ABANDONED: {result.abandoned}"
+            + (f" — {result.not_reached} further worktree(s) were never assessed"
+               if result.not_reached else "")
+        )
     if result.count("skipped"):
         lines.append(
             "Skipped is a normal outcome, not an error: clear each blocker above and "
@@ -1318,6 +1327,7 @@ def sweep_json(result: SweepResult) -> dict:
         "error": result.plan.error,
         "fix": result.plan.fix or None,
         "abandoned": result.abandoned or None,
+        "not_reached": result.not_reached,
         "exit_code": result.exit_code,
         "summary": {
             "planned": result.count("planned"),

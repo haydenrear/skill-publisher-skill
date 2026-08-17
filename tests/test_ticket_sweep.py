@@ -473,6 +473,8 @@ def test_gate_exit_9_abandons_the_pass_and_exits_9(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "policy `frozen`" in out
     assert "ABANDONED" in out
+    assert "1 further worktree(s) were never assessed" in out, \
+        "an abandoned summary must not read as a complete one"
     assert "home policy live" in out
     assert first.is_dir() and second.is_dir()
 
