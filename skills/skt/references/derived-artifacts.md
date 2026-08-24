@@ -93,8 +93,16 @@ unsayable".
 > ```
 >
 > **Exit 0, nothing done, and that is a correct report rather than a failure.**
-> Such a tree comes back as a side effect of reinstalling the unit that
-> originally wrote it, or not at all.
+>
+> The remedy is awkward precisely because the diagnosis is "no record says which
+> installer wrote it" — you cannot reinstall a unit nothing names. What you have
+> instead is a **hint in the id**, which is what the CLI's own last sentence
+> means: `cache/skill-script-deploy-helm-computeq` reads as *the `computeq`
+> skill-script of the `deploy-helm` unit*, so `skill-manager sync deploy-helm
+> --force-scripts` is the thing to try. That is an inference from a filename, not
+> a record, and it can be wrong. If the id carries no unit name, there is no
+> remedy to try and the tree comes back only as a side effect of whatever
+> originally produced it.
 
 **Only `cli-shim` is a name you can pass to `build`.** Every other kind, named
 on the command line, is *reported* with the command that does rebuild it and is
@@ -329,7 +337,10 @@ The check read raw ledger outputs without asking `lazy_artifacts` or the
 artifact's materialization, and reasoned that "declared, and absent, and the
 parent has it" could not be a normal state. *A lazy home satisfies that
 conjunction from birth.* Worse, the verdict depended on the operator's machine:
-eight artifacts were `declared-only` in that clone and exactly one fired,
+eight artifacts were `declared-only` in **that** clone — a different home from
+the one measured elsewhere on this page, which has 39 artifacts and 13
+`declared-only`; the count is a property of the machine, which is the point —
+and exactly one fired,
 because a store further up the chain happened to hold that one binary while the
 clone's own source home did not — the exact gap between the two words in the
 box above. On a machine where more had been built, the same untouched clone
@@ -347,7 +358,7 @@ number of times on every machine.
 {
   "schemaVersion" : 1,
   "clonedFrom" : "/Users/…/skill-manager/.skill-manager",
-  "clonedAt" : "2026-08-24T00:27:15.950595Z",
+  "clonedAt" : "2026-08-24T00:27:15.950595Z",     // UTC; the local day was 08-23
   "parentStores" : [ "/Users/…/.skill-manager" ]
 }
 ```
@@ -394,10 +405,13 @@ arrival converts a cheap clone into an expensive one and changes no answer.
 
 ```bash
 skill-manager build --stale --dry-run --json       # what it would do, changing nothing
-skill-manager build                                # everything stale — read the warning below
+skill-manager build cli-shim:skill-script/skt      # one artifact + its STALE prerequisites
 skill-manager build cli-shim:skill-script/skt      # one artifact + its STALE prerequisites
 skill-manager build 'cli-shim:pip/jinja2-cli[yaml]' --force
 skt build jinja2                                   # skt resolves short names to ids
+
+skill-manager build                                # NO ARGUMENT: everything stale.
+skt build                                          # Read the warning below first.
 ```
 
 `--dry-run` first is free and names the producer for each target.
@@ -467,7 +481,23 @@ $ skt check
 skt check: all current (4 change-managed unit(s), tier worktree)
 ```
 
-Read that last line precisely: **`all current` is counting the four
+**The two lines do not add up, and here is why before you try.** `13 + 4 + 22 =
+39` on the first: `stale`, `unverifiable` and `current` are three **disjoint**
+buckets over every artifact. The second line is **not** a breakdown of one
+bucket. `0 rebuildable` and `13 declared-not-built` are subsets **of the 13
+stale**; `4 unverifiable` is the separate top-level bucket carried over from the
+first line, printed alongside rather than inside. `0 + 13 = 13` ✓, and the 4 sits
+outside. It reads as `17 of 13` only if you assume one axis, and there are two:
+
+- **materialization** — `materialized` / `partial` / `declared-only`. This is
+  what splits the 13 stale into `rebuildable` and `declared-not-built`.
+- **agreement** — `agrees` / `disagrees` / `unrecorded` / `unverifiable`. This is
+  a different question, and `unverifiable` is one of *its* values.
+
+The table below is three things worth acting on differently, **not** three parts
+of one whole.
+
+Read the last line precisely too: **`all current` is counting the four
 change-managed *units*, not the artifacts.** Artifacts reach `skt check` only
 as separate `rebuild with:` notification lines, and here there were none to
 raise. The two lines are not in conflict; they are answering different
