@@ -15,9 +15,10 @@ your worktree home is broken because a tool "is missing".
 1. A **derived artifact** is anything a home *produced* rather than authored: a
    CLI entry point, a venv, a projection symlink, the unit store itself.
    `skill-manager artifacts list` names every one.
-2. A clone **inherits** the artifacts its parent actually holds — they stay
-   usable, on `PATH`, through links in the clone's own `bin/`. What the parent
-   does not hold, the clone **declares**: recorded in the ledger, not built.
+2. A clone **inherits** the entry points its source home already held — they
+   stay usable, reachable through links in the clone's own `bin/`. What the
+   source home did not hold, the clone **declares**: recorded in the ledger,
+   not built.
 3. **Rebuild after *you* change the unit that owns the artifact. Not on
    arrival.** A fresh clone that has built nothing is a healthy clone.
 4. The command is `skill-manager build <artifact-id>` (`skt build <id>` is the
@@ -77,10 +78,12 @@ unsayable".
 
 ### The nine kinds, and what rebuilds each
 
-**Only `cli-shim` has a per-artifact producer.** Everything else is *reported*
-by `build` with the command that does rebuild it, and is never claimed to have
-been built by `build`. This is the single most common misreading of a `build`
-run, so it is the second row of the table:
+**Only `cli-shim` is a name you can pass to `build`.** Every other kind, named
+on the command line, is *reported* with the command that does rebuild it and is
+never claimed to have been built. (That is about **naming** one. Building a
+`cli-shim` still provisions the tree behind it as a side effect — §4 measures
+it.) This is the single most common misreading of a `build` run, so it is the
+second row of the table:
 
 | kind | what it is | rebuilt by |
 | --- | --- | --- |
@@ -158,6 +161,10 @@ descent: <clone>/.skill-manager records that it was cloned from <project>/.skill
     /Users/…/.skill-manager  — re-derived, so its artifacts are shared by right
 ```
 
+That is verbatim. The `->` names **the home each link reaches**, not the link's
+full target — which is why all three read the same. `ls -l <clone>/bin/cli` if
+you want the actual targets.
+
 **"Shared by right"** is the operative phrase. A link into the parent store is
 not a leak the clone got away with; it is the contract working, and `home
 verify` exits 0 on it.
@@ -187,19 +194,35 @@ $ echo $?
 86
 ```
 
+(That `note:` line is generated text and is broader than what `build` now does
+— see §6 before you act on it. The habit it recommends is still right.)
+
 **Exit 86 means "declared, not built". It does not mean broken.** It is not
 127: the command *was* found. The whole message goes to stderr, stdout stays
 empty, and the refusal hands you the id. Build it if you need the tool; ignore
 it if you do not. (Quote ids containing `[` `]` — that is a shell glob.)
 
-> **A declared artifact does not always have a cold shim.** A cold shim is
-> written where the source home *had* an entry point whose backing tree the
-> copy does not carry. If the source home never had one, the ledger still
-> declares the artifact and `bin/cli/<name>` is simply **absent** — so you get
-> plain `127 command not found`, not 86. Measured: in a worktree clone,
-> `bin/cli/jinja2` was a cold shim (86) while `cli-shim:pip/pytest` was
+> **A declared artifact does not always have a cold shim, and this is the one
+> branch that looks like real breakage.** A cold shim is written where the
+> source home *had* an entry point whose backing tree the copy does not carry.
+> If the source home never had one, the ledger still declares the artifact and
+> `bin/cli/<name>` is simply **absent** — so you get plain `127 command not
+> found`, not 86, and nothing prints an id for you. Measured: in a worktree
+> clone, `bin/cli/jinja2` was a cold shim (86) while `cli-shim:pip/pytest` was
 > `declared-only` with no file at all (127). Both are the same lazy state; only
-> one of them can tell you so.
+> one of them can say so.
+>
+> **When you get 127 from a tool a unit declares, look it up rather than
+> concluding your PATH is broken:**
+>
+> ```bash
+> skill-manager artifacts list --kind cli-shim | grep <tool>
+> skill-manager artifacts list --owner <unit>          # if you know the unit
+> skill-manager build <the-id-that-lists>              # if you need the tool
+> ```
+>
+> A row that comes back `declared-only` is the answer: the home never built it,
+> which is the normal lazy state and not damage.
 
 `home clone` says how many of each it made:
 
@@ -330,14 +353,20 @@ arrival converts a cheap clone into an expensive one and changes no answer.
 ## 4. The command, and how to read `artifacts stale`
 
 ```bash
-skill-manager build                                # everything stale
 skill-manager build --stale --dry-run --json       # what it would do, changing nothing
+skill-manager build                                # everything stale — read the warning below
 skill-manager build cli-shim:skill-script/skt      # one artifact + its STALE prerequisites
 skill-manager build 'cli-shim:pip/jinja2-cli[yaml]' --force
-skt build computeq                                 # skt resolves short names to ids
+skt build jinja2                                   # skt resolves short names to ids
 ```
 
 `--dry-run` first is free and names the producer for each target.
+
+> **Do not reach for bare `build` (or bare `skt build`) on a lazy home.** With
+> no argument it builds *everything stale*, and on a fresh clone that is every
+> declared-not-built artifact — the eager rebuild this whole page argues
+> against, reached by typing fewer characters. Name the id you actually need,
+> or run `--stale --dry-run` first and read what it plans.
 
 **Building a `cli-shim` also provisions the tree behind it.** The nine-kinds
 table says `provisioned-tree` is not directly buildable, and that is true of
@@ -413,9 +442,17 @@ different questions, and the vocabulary that separates them is:
 
 | skt's word | which artifacts | act? |
 | --- | --- | --- |
-| **rebuildable** | stale, **present on disk**, and of a kind `build` produces | **Yes.** This is the real signal. |
+| **rebuildable** | stale, **`materialized`** (i.e. *not* `declared-only`), and of a kind `build` produces | **Yes.** This is the real signal. |
 | **declared-not-built** | `declared-only` — lazy, never materialized here | No. Normal from birth. |
 | **unverifiable** | nothing in this home could decide them | No. Not "clean", but not actionable either. |
+
+> **"Materialized" is not "a file is there."** A cold shim *is* a real
+> executable file, and its artifact is still `declared-only` — materialization
+> is decided by whether the outputs are **usable**, and a shim whose backing
+> tree is missing is not. That is why the healthy clone above counts **0
+> rebuildable** while `bin/cli/jinja2` exists on disk. If you are hand-rolling
+> this split, key on the `materialization` column of `artifacts list`, never on
+> whether a path exists.
 
 `skt check` only ever raises a notification from the **rebuildable** set, on
 purpose: *"a declared-but-never-built artifact is the normal state of a lazily
