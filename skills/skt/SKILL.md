@@ -36,8 +36,8 @@ Go there if you are asking any of:
 - what is a derived artifact, and what names them?
 - what did my worktree home inherit from its parent, and what did it only
   declare?
-- **a command on my `PATH` refused instead of running, with an exit code I do
-  not recognise** — or is simply not there at all;
+- **a command on my `PATH` refused instead of running — `exit 86`** — or is
+  simply not there at all;
 - is this home broken, or is this what a healthy clone looks like?
 - should I rebuild something, and with what command?
 
