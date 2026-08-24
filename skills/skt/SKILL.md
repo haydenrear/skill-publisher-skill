@@ -18,10 +18,36 @@ skt ticket close <T>  # teardown through the close-out gate
 skt ticket list       # every ticket worktree here, and what blocks retiring it
 skt ticket sweep      # retire many at once — dry run unless you pass --yes
 skt publish [<unit>]  # a home-edited skill -> up one tier -> its own git repo
+skt build [<id>]      # rebuild a derived artifact whose inputs you changed
 ```
 
 `skt` is on `PATH` in every skill-manager home (`<home>/bin/cli/skt`).
 `skt --help` is authoritative for syntax.
+
+## Derived artifacts — read this before deciding a home is broken
+
+`skt status` and `skt check` both report artifact state into your opening
+context, so every session is told artifacts exist. **What they are, what a
+clone inherits versus merely declares, and when to rebuild is stated once, in
+`references/derived-artifacts.md`.** Read it rather than the source: the last
+two agents who read the source instead got the root cause wrong, in opposite
+directions, and that page names both.
+
+The one-paragraph version, so you can tell whether you need the page at all:
+
+> A **derived artifact** is anything a home produced rather than authored —
+> a CLI entry point, a venv, a projection, a unit store. A clone **inherits**
+> the ones its parent holds (usable, through links in its own `bin/`) and
+> **declares** the rest without building them, because building artifacts
+> nobody changed is waste. **Rebuild after *you* change the owning unit, not on
+> arrival**, with `skill-manager build <id>` (or `skt build <id>`) — the id is
+> printed by whatever refused. A command that exits **86** is telling you it is
+> declared and not built, which is a normal state in a lazy home and not damage.
+
+So: `skt status` reporting `13 stale of 39 — 0 rebuildable` on a home you just
+created is a **healthy** home, and there is nothing to do. Only the
+*rebuildable* count is a call to action, which is why `skt check` raises
+notifications from that set alone.
 
 ## When `skt check` says a unit is NOT stale
 
@@ -117,6 +143,18 @@ Homes are real copies, never symlinks. An edit inside one is **in no git
 diff** — `skt publish` is how it survives: `home sync` moves it one tier
 up (and no further), `unit publish` is the only route to the skill's own
 repository and to other machines.
+
+A copy of a home is not a copy of everything the home can *do*: the derived
+artifacts it holds are inherited or declared rather than rebuilt, which is
+`references/derived-artifacts.md`.
+
+## This skill's reference pages
+
+| Question | Page |
+| --- | --- |
+| What is an artifact, what does a clone inherit versus declare, when do I rebuild? | `references/derived-artifacts.md` |
+| Which harnesses get hooks, and which get a projected skill instead? | `../../references/harness-capabilities.md` |
+| The deep unit-authoring schemas | `../../references/` (see the `unit-authoring` skill) |
 
 ## Related skills in this plugin
 
