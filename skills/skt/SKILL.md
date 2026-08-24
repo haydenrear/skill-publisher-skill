@@ -21,8 +21,39 @@ skt publish [<unit>]  # a home-edited skill -> up one tier -> its own git repo
 skt build [<id>]      # rebuild a derived artifact whose inputs you changed
 ```
 
-`skt` is on `PATH` in every skill-manager home (`<home>/bin/cli/skt`).
-`skt --help` is authoritative for syntax.
+`skt` is on `PATH` in every home **that installed this plugin**
+(`<home>/bin/cli/skt`). `skt --help` is authoritative for syntax.
+
+**A home does not inherit it.** Project and worktree homes are copies of the
+home above them, so a home cloned from one that never installed `skt` has no
+`bin/cli/skt` and no `plugins/skt/` — and then none of this page is loaded in
+that session either, which is why you are unlikely to be reading this when it
+matters.
+
+That is not hypothetical, and the fix is one command. **As measured on
+2026-08-24**, the skill-manager repository's project home and a ticket worktree
+cloned from it each held four skills, no plugins and no `skt` — while the
+`skill-project.toml` that home is meant to realize declared the plugin. A single
+`skill-manager project resolve` against the worktree home installed `skt` and
+`skill-manager` into it and the gap closed. **So if you are reading this from a
+home that has `skt`, that measurement is history and not a description of where
+you are standing** — which is the whole shape of the problem: a home is a copy
+taken at an instant, and a sentence about one home is not a sentence about
+another.
+
+If `skt` is not there, nothing is broken and nothing is lost — you are simply
+one tier down from where it was installed. Every `skt` verb is a wrapper:
+
+| instead of | run |
+| --- | --- |
+| `skt status` / `skt check` | `skill-manager list`, `skill-manager home describe --json` |
+| `skt sync <unit>` | `skill-manager sync <unit> --git-latest` |
+| `skt publish <unit>` | `skill-manager home sync` then `skill-manager unit publish` (the two legs below) |
+| `skt ticket new/close` | `<home>/skills/git-issue-workflow/scripts/wt new\|close <TICKET>` — for a home that installed that unit; the same caveat applies to it |
+
+To get the plugin itself into this checkout's home, declare it in the
+checkout's `skill-project.toml` and run `skill-manager project resolve`
+against **that** home.
 
 ## Derived artifacts — read this before deciding a home is broken
 
@@ -131,7 +162,7 @@ real space.
 | Tier | Path | Updated by | Your obligation |
 | --- | --- | --- | --- |
 | root | `~/.skill-manager` | operator installs; `skt sync` | publish local edits globally (`skt check` prompts here) |
-| project | `<repo>/.skill-manager` | cloned from root; refreshed via `wt`/`skt ticket` imports | none — pull-side only |
+| project | `<repo>/.skill-manager` | cloned from root; refreshed via `wt`/`skt ticket` imports | pull-side by default — but an edit made *here* owes the same two legs as any other |
 | worktree | `<worktree>/.skill-manager` | cloned from project at `ticket new` | get edits OUT before teardown (`skt publish`; the close gate refuses otherwise) |
 
 Homes are real copies, never symlinks. An edit inside one is **in no git
