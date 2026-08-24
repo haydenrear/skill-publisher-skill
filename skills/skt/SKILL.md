@@ -20,8 +20,30 @@ skt ticket sweep      # retire many at once — dry run unless you pass --yes
 skt publish [<unit>]  # a home-edited skill -> up one tier -> its own git repo
 ```
 
-`skt` is on `PATH` in every skill-manager home (`<home>/bin/cli/skt`).
-`skt --help` is authoritative for syntax.
+`skt` is on `PATH` in every home **that installed this plugin**
+(`<home>/bin/cli/skt`). `skt --help` is authoritative for syntax.
+
+**A home does not inherit it.** Project and worktree homes are copies of the
+home above them, so a home cloned from one that never installed `skt` has no
+`bin/cli/skt` and no `plugins/skt/` — and then none of this page is loaded in
+that session either, which is why you are unlikely to be reading this when it
+matters. Measured on the skill-manager repository, 2026-08-24: its project home
+and a ticket worktree cloned from it each held four skills, no plugins, and no
+`skt`, while the manifest that home is meant to realize declares the plugin.
+
+If `skt` is not there, nothing is broken and nothing is lost — you are simply
+one tier down from where it was installed. Every `skt` verb is a wrapper:
+
+| instead of | run |
+| --- | --- |
+| `skt status` / `skt check` | `skill-manager list`, `skill-manager home describe --json` |
+| `skt sync <unit>` | `skill-manager sync <unit> --git-latest` |
+| `skt publish <unit>` | `skill-manager home sync` then `skill-manager unit publish` (the two legs below) |
+| `skt ticket new/close` | `<home>/skills/git-issue-workflow/scripts/wt new\|close <TICKET>` — for a home that installed that unit; the same caveat applies to it |
+
+To get the plugin itself into this checkout's home, declare it in the
+checkout's `skill-project.toml` and run `skill-manager project resolve`
+against **that** home.
 
 ## When `skt check` says a unit is NOT stale
 
