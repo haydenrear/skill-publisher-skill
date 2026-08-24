@@ -18,10 +18,31 @@ skt ticket close <T>  # teardown through the close-out gate
 skt ticket list       # every ticket worktree here, and what blocks retiring it
 skt ticket sweep      # retire many at once — dry run unless you pass --yes
 skt publish [<unit>]  # a home-edited skill -> up one tier -> its own git repo
+skt build [<id>]      # rebuild a derived artifact whose inputs you changed
 ```
 
 `skt` is on `PATH` in every skill-manager home (`<home>/bin/cli/skt`).
 `skt --help` is authoritative for syntax.
+
+## Derived artifacts — read this before deciding a home is broken
+
+`skt status` and `skt check` report artifact state into your opening context, so
+every session is told artifacts exist. **What they are, what a clone inherits
+versus merely declares, and when to rebuild is in
+`references/derived-artifacts.md`.**
+
+Go there if you are asking any of:
+
+- what is a derived artifact, and what names them?
+- what did my worktree home inherit from its parent, and what did it only
+  declare?
+- **a command on my `PATH` refused instead of running — `exit 86`** — or is
+  simply not there at all;
+- is this home broken, or is this what a healthy clone looks like?
+- should I rebuild something, and with what command?
+
+Read it rather than the source. The last two agents who read the source instead
+got the root cause wrong, in opposite directions, and the page names both.
 
 ## When `skt check` says a unit is NOT stale
 
@@ -117,6 +138,18 @@ Homes are real copies, never symlinks. An edit inside one is **in no git
 diff** — `skt publish` is how it survives: `home sync` moves it one tier
 up (and no further), `unit publish` is the only route to the skill's own
 repository and to other machines.
+
+A copy of a home is not a copy of everything the home can *do*: the derived
+artifacts it holds are inherited or declared rather than rebuilt, which is
+`references/derived-artifacts.md`.
+
+## This skill's reference pages
+
+| Question | Page |
+| --- | --- |
+| What is an artifact, what does a clone inherit versus declare, when do I rebuild? | `references/derived-artifacts.md` |
+| Which harnesses get hooks, and which get a projected skill instead? | `../../references/harness-capabilities.md` |
+| The deep unit-authoring schemas | `../../references/` (see the `unit-authoring` skill) |
 
 ## Related skills in this plugin
 
