@@ -78,6 +78,24 @@ unsayable".
 
 ### The nine kinds, and what rebuilds each
 
+> **An owner-less artifact has no producer at all, and no command in this table
+> helps.** Three of the four `provisioned-tree` rows in the clone measured for
+> this page carry no `owner`. Measured:
+>
+> ```
+> $ skill-manager build 'provisioned-tree:cache/skill-script-deploy-helm-computeq' --yes
+> not rebuilt here — nothing in `build` produces these:
+>   provisioned-tree:cache/skill-script-deploy-helm-computeq  (stale)
+>       nothing in this home claims to have produced it: no record says which
+>       installer wrote it and no artifact names it as an input, so there is no
+>       install to rerun and `build` has nothing to offer.
+>   1 selected: 0 built, 0 already current, 1 not buildable here      exit 0
+> ```
+>
+> **Exit 0, nothing done, and that is a correct report rather than a failure.**
+> Such a tree comes back as a side effect of reinstalling the unit that
+> originally wrote it, or not at all.
+
 **Only `cli-shim` is a name you can pass to `build`.** Every other kind, named
 on the command line, is *reported* with the command that does rebuild it and is
 never claimed to have been built. (That is about **naming** one. Building a
@@ -89,7 +107,7 @@ second row of the table:
 | --- | --- | --- |
 | `cli-shim` | a generated executable in `bin/cli/`, one per locked CLI dep | **`skill-manager build <id>`** |
 | `unit-store` | a unit's bytes under `skills/<n>` or `plugins/<n>` | `skill-manager sync <unit>` |
-| `provisioned-tree` | a machine-provisioned tree under `cache/`, `venvs/`, `tools/`, `npm/`, `pm/` | `sync`, or the shim that fronts it |
+| `provisioned-tree` | a machine-provisioned tree under `cache/`, `venvs/`, `tools/`, `npm/`, `pm/` | `sync`, or the `cli-shim` that fronts it. **With no `owner`, nothing rebuilds it** — see below |
 | `projection` | one agent-visible link/copy a binding produced | `skill-manager sync`, or `rebind <unit>` |
 | `marketplace-entry` | one plugin row in the generated `plugin-marketplace/` tree | `skill-manager sync` |
 | `harness-instance` | one instantiated harness sandbox | `harness instantiate` / `sync harness:<name>` |
@@ -260,28 +278,50 @@ afterwards rather than inferred.
 
 Say it plainly, because a shipped bug got this wrong:
 
-| command | what it calls a declared, unbuilt artifact |
+| command | what it does with a declared, unbuilt artifact |
 | --- | --- |
-| `artifacts list` | `declared-only` |
-| `home verify` | **`DECLARED and not built`** — *reported, never counted* |
+| `artifacts list` | calls it `declared-only` |
+| `home verify` | **says nothing about it, and exits 0** |
 | `home repair` | **nothing. There is nothing to repair.** |
 | `skt check` | **nothing.** It is filtered out before a notification exists. |
 
-`home verify`'s own words:
+**`home verify` on a healthy lazy clone is silent about unbuilt artifacts, and
+silence is what you should expect.** Measured:
 
 ```
-N entry point(s) in <home> are DECLARED and not built — normal in a home with
-`lazy_artifacts = true`, and not a failure. Each one names the command that
-builds it when it is run.
+$ skill-manager home verify --home <clone>
+✓ every reference in <clone> resolves, and no path in it reaches any other
+  Skill Manager home except the 5 sanctioned parent-store shim(s) above
+$ echo $?
+0
+$ skill-manager home verify --home <clone> | grep -c DECLARED
+0
 ```
 
-Those lines **do not affect the exit code.** What does is the neighbouring,
-genuinely different category: *unresolved* references — `"provisioning was
-never completed, so the tools they name will fail at exec time"` — which comes
-with the `build` command that completes it. Declared-not-built and unresolved
-look similar on disk and mean opposite things; the partition asks
-`lazy_artifacts` **and** whether the path is one of the ledger's declared
-outputs, and requires both.
+The command *does* carry a `DECLARED and not built — normal in a home with
+lazy_artifacts = true` message, classified as reported-never-counted. **Do not
+expect to see it.** On the clones measured for this page it never printed: cold
+shims are regular files that *resolve*, so they are never collected as
+candidates in the first place. Read `home verify` as answering one question —
+*does everything resolve?* — and `artifacts list` as the one that names
+materialization.
+
+What **does** move `home verify`'s exit code is the neighbouring and genuinely
+different category: *unresolved* references. Same home, one real dangling
+symlink planted:
+
+```
+✗ 1 reference(s) in <clone> do not resolve — provisioning was never completed,
+  so the tools they name will fail at exec time
+✗     bin/cli/fixture-dangling -> ../../venvs/fixture-missing/bin/tool
+✗   complete it with: … skill-manager build --stale, then re-run this check
+                                                                    exit 1
+```
+
+Declared-not-built and unresolved read alike in prose and mean opposite things,
+and `home verify` is not the command that separates them. `artifacts list`
+saying `declared-only` is lazy and fine; a broken symlink with no ledger row is
+unresolved and worth acting on.
 
 **The bug, so nobody rebuilds it.** `home repair` once reported a *fresh,
 untouched, healthy clone as damaged* (`PRUNED_INHERITED_ENTRY bin/cli/tofu`).

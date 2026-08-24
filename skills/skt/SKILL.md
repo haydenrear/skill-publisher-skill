@@ -26,28 +26,21 @@ skt build [<id>]      # rebuild a derived artifact whose inputs you changed
 
 ## Derived artifacts — read this before deciding a home is broken
 
-`skt status` and `skt check` both report artifact state into your opening
-context, so every session is told artifacts exist. **What they are, what a
-clone inherits versus merely declares, and when to rebuild is stated once, in
-`references/derived-artifacts.md`.** Read it rather than the source: the last
-two agents who read the source instead got the root cause wrong, in opposite
-directions, and that page names both.
+`skt status` and `skt check` report artifact state into your opening context, so
+every session is told artifacts exist. **What they are, what a clone inherits
+versus merely declares, and when to rebuild is in
+`references/derived-artifacts.md`.**
 
-The one-paragraph version, so you can tell whether you need the page at all:
+Go there if you are asking any of:
 
-> A **derived artifact** is anything a home produced rather than authored —
-> a CLI entry point, a venv, a projection, a unit store. A clone **inherits**
-> the ones its parent holds (usable, through links in its own `bin/`) and
-> **declares** the rest without building them, because building artifacts
-> nobody changed is waste. **Rebuild after *you* change the owning unit, not on
-> arrival**, with `skill-manager build <id>` (or `skt build <id>`) — the id is
-> printed by whatever refused. A command that exits **86** is telling you it is
-> declared and not built, which is a normal state in a lazy home and not damage.
+- what is a derived artifact, and what names them?
+- what did my worktree home inherit from its parent, and what did it only
+  declare?
+- is this home broken, or is this what a healthy clone looks like?
+- should I rebuild something, and with what command?
 
-So: `skt status` reporting `13 stale of 39 — 0 rebuildable` on a home you just
-created is a **healthy** home, and there is nothing to do. Only the
-*rebuildable* count is a call to action, which is why `skt check` raises
-notifications from that set alone.
+Read it rather than the source. The last two agents who read the source instead
+got the root cause wrong, in opposite directions, and the page names both.
 
 ## When `skt check` says a unit is NOT stale
 
