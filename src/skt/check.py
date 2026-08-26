@@ -378,6 +378,17 @@ def _artifact_state(home: Path, deadline: float) -> dict:
             }
             for row in rebuildable
         ],
+        # The stale rows that are NOT rebuildable, which `rows` above
+        # deliberately omits. A unit-store row is exactly that -- it has no
+        # local producer -- and it is also the most common ROOT CAUSE of a
+        # rebuildable row being stale. Omitting it from the state entirely is
+        # why the remedy could not name it: the reader that had to choose the
+        # remedy could not see the thing that needed fixing.
+        "stale_stores": sorted({
+            str(getattr(row, "id", "")).split(":", 1)[1]
+            for row in survey.stale
+            if str(getattr(row, "id", "")).startswith("unit-store:")
+        }),
     }
 
 
@@ -503,6 +514,53 @@ def _artifact_notifications(state: dict, unit_notes: list[dict]) -> list[dict]:
             for b in row.get("because") or [] if b.startswith("unit-store:")
         ))
 
+    # THE REMEDY MUST CLEAR THE CONDITION IT NAMES.
+    #
+    # Every stale row used to be handed `skt build <name>`. For an artifact
+    # that is stale because an upstream unit-store is stale, that command
+    # runs, reports "built", and the row reads stale again immediately --
+    # because `build` re-derives the artifact from an input that is still
+    # wrong. Measured on the operator's project home, 2026-08-26:
+    #
+    #   skt check  -> artifact computeq is stale (deploy-helm moved)
+    #                 rebuild with: skt build computeq
+    #   skt build computeq helm-deploy monitoring
+    #             -> "3 built" ... "4 of the selected artifact(s) are still stale"
+    #   skt check  -> the same three lines, unchanged
+    #
+    # A loop, and the operator is the thing in it. `skill-manager artifacts
+    # stale` knew the answer the whole time and prints it on the unit-store
+    # row: "a unit's store bytes come from its source, not from a local
+    # producer -- `skill-manager sync deploy-helm`". One sync cleared all
+    # sixteen stale artifacts in that home.
+    #
+    # So: when this row's staleness is inherited from a unit-store that is
+    # ITSELF in the stale set, name the sync that fixes the root cause. Only
+    # then -- an artifact built from a FRESH store and stale on its own
+    # inputs is exactly what `skt build` is for, and still gets it.
+    # Both sources on purpose: `stale_stores` is the authoritative one (it can
+    # see the non-rebuildable rows), and the rows themselves cover a state dict
+    # built before that field existed.
+    stale_stores = set(state.get("stale_stores") or ())
+    stale_stores |= {
+        str(r.get("id", "")).split(":", 1)[1]
+        for r in (state.get("rows") or [])
+        if str(r.get("id", "")).startswith("unit-store:")
+    }
+
+    def _remedy(row: dict, name: str) -> str:
+        if str(row.get("id", "")).startswith("unit-store:"):
+            # The root cause itself. `build` has no producer for a store row.
+            return f"skill-manager sync {shlex.quote(name)}"
+        upstream = next(
+            (b.split(":", 1)[1] for b in row.get("because") or []
+             if b.startswith("unit-store:") and b.split(":", 1)[1] in stale_stores),
+            None,
+        )
+        if upstream:
+            return f"skill-manager sync {shlex.quote(upstream)}"
+        return f"skt build {shlex.quote(name)}"
+
     ordered = sorted(state.get("rows") or [], key=_already_said)
     out = []
     for row in ordered[:MAX_ARTIFACT_NOTIFICATIONS]:
@@ -520,7 +578,7 @@ def _artifact_notifications(state: dict, unit_notes: list[dict]) -> list[dict]:
                 # One of the seven rebuildable artifacts in the operator's
                 # own project home is `jinja2-cli[yaml]`, and unquoted that
                 # is `zsh: no matches found` in the operator's own shell.
-                "fix": f"skt build {shlex.quote(name)}",
+                "fix": _remedy(row, name),
             }
         )
     return out

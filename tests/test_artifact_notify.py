@@ -81,10 +81,19 @@ def test_check_names_the_artifact_and_the_rebuild_command(tmp_path):
     note = notes[0]
     assert note["name"] == "computeq"
     assert note["artifact"] == "cli-shim:skill-script/computeq"
-    assert note["fix"] == "skt build computeq"
+    # CHANGED 2026-08-26, and the old expectation is worth naming: it asserted
+    # `skt build computeq`, and STALE_DOC's own rows say why that was the bug
+    # rather than the behaviour. The fixture carries `unit-store:deploy-helm`
+    # as stale AND `computeq` with `because: [unit-store:deploy-helm]` -- so
+    # `skt build computeq` re-derives from an input that is still wrong,
+    # reports "built", and the row reads stale again. Measured on the
+    # operator's project home: check -> build -> check printed the identical
+    # three lines, and one `skill-manager sync deploy-helm` cleared all
+    # sixteen stale artifacts. The remedy now names the root cause.
+    assert note["fix"] == "skill-manager sync deploy-helm"
     text = check_mod.render_text(report)
     assert "artifact computeq is stale (deploy-helm moved)" in text
-    assert "rebuild with: skt build computeq" in text
+    assert "rebuild with: skill-manager sync deploy-helm" in text
 
 
 def test_the_cause_carries_both_hashes_when_the_unit_check_found_them(tmp_path):
