@@ -265,3 +265,92 @@ def test_main_checkout_has_no_sync_block(tmp_path):
     repo = make_repo(tmp_path / "repo")
     make_home(repo, units={})
     assert status.collect(repo)["worktree_sync"] is None
+
+
+# --- the promotion block -----------------------------------------------------
+#
+# Added after skill-manager's disclosure-cost eval (2026-08-25) measured what a
+# fresh agent, inheriting nothing, actually pays to orient itself. Asked "which
+# tier am I, what does this home inherit, how does my edit reach the tier above
+# and the unit's own repo, what must I never write", agents answered the FIRST
+# from `skt status` and hunted for the other three: 10,879 corpus tokens at the
+# worktree tier and 21,186 at root, against a 2,000-token budget, reading a
+# 13,000-token reference page and -- at root -- skt's own Python source.
+#
+# `skt publish` already knew the answer. These assertions are that `skt status`
+# now says it, and that it says it by ASKING publish rather than by growing a
+# second resolver, which is the mistake the whole family of bugs is made of.
+
+
+def test_worktree_status_names_its_parent_and_the_route_up(tmp_path):
+    repo = make_repo(tmp_path / "repo")
+    make_home(repo, units={"alpha": {}})
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-q", "-b", "feature/T-9",
+         str(tmp_path / "repo-T-9")],
+        check=True,
+    )
+    wt = tmp_path / "repo-T-9"
+    make_home(wt, units={"alpha": {}})
+
+    report = status.collect(wt)
+    assert report["tier"] == "worktree"
+    # The parent is the MAIN working tree's home, resolved by publish's own
+    # _parent_home -- so status and publish cannot drift apart.
+    assert report["promotion"]["parent"] == str(repo / ".skill-manager")
+    assert report["promotion"]["error"] is None
+
+    text = status.render_text(report)
+    assert str(repo / ".skill-manager") in text, "the parent home is named"
+    assert "skt publish" in text, "the route up is named, not just the tier"
+    assert "Never write" in text, "the home NOT to write is named"
+
+
+def test_root_status_says_there_is_nothing_above(tmp_path, monkeypatch):
+    fake_root = tmp_path / "fake-operator-root"
+    repo = make_repo(fake_root / "somewhere")
+    home = make_home(fake_root, units={"alpha": {}})
+    monkeypatch.setenv("SKILL_MANAGER_HOME", str(home))
+
+    report = status.collect(repo)
+    assert report["tier"] == "root"
+    # (None, None) is the root tier -- nothing above BY DESIGN, which is a
+    # different statement from "could not work it out", and the text has to
+    # make that difference legible or an agent will go looking for a parent.
+    assert report["promotion"] == {"parent": None, "error": None}
+    text = status.render_text(report)
+    assert "none — this IS the root home" in text
+    assert "straight to the unit's own git repo" in text
+
+
+def test_an_unresolvable_parent_is_reported_not_swallowed(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path / "repo")
+    make_home(repo, units={"alpha": {}})
+    monkeypatch.setattr(
+        "skt.publish._parent_home",
+        lambda home, start: (None, "operator root home not found at /nope"),
+    )
+    report = status.collect(repo)
+    assert report["promotion"]["parent"] is None
+    text = status.render_text(report)
+    assert "UNRESOLVED" in text
+    assert "will REFUSE" in text, (
+        "an agent told the parent is unknown must also be told publish will "
+        "refuse -- otherwise the helpful next move is to hand-copy the unit, "
+        "which is the damage shape this line exists to prevent"
+    )
+
+
+def test_a_raising_resolver_cannot_break_the_status_line(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path / "repo")
+    make_home(repo, units={"alpha": {}})
+
+    def boom(home, start):
+        raise RuntimeError("git exploded")
+
+    monkeypatch.setattr("skt.publish._parent_home", boom)
+    # `skt status` runs in the SessionStart hook. A promotion line that can
+    # raise would take the whole orientation report down with it.
+    report = status.collect(repo)
+    assert "could not resolve the tier above" in report["promotion"]["error"]
+    assert "units" in status.render_text(report)
