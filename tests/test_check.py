@@ -473,3 +473,76 @@ def test_an_error_that_says_nothing_about_the_store_keeps_its_new_version(tmp_pa
     note = next(n for n in report["notifications"] if n["kind"] == "new-version")
     assert note["remote"] == new_tip[:8]
     assert "skt sync alpha" in note["message"]
+
+
+# --- the remedy must clear the condition it names ----------------------------
+
+def _artifact_state(rows):
+    return {"state": "ok", "rows": rows}
+
+
+def test_inherited_staleness_names_the_sync_that_fixes_the_root_cause():
+    """`skt build` cannot clear an artifact whose INPUT store is stale.
+
+    Measured on the operator's project home, 2026-08-26: check said
+    "rebuild with: skt build computeq"; build reported "3 built" and then
+    "4 of the selected artifact(s) are still stale"; check printed the same
+    three lines again. A loop with the operator inside it. One
+    `skill-manager sync deploy-helm` cleared all sixteen stale artifacts.
+    """
+    rows = [
+        {"id": "unit-store:deploy-helm", "name": "deploy-helm",
+         "reason": "what is recorded about it does not describe the bytes on disk"},
+        {"id": "provisioned-tree:cache/x", "name": "computeq",
+         "because": ["unit-store:deploy-helm"],
+         "reason": "it is built from unit-store:deploy-helm, which is stale"},
+    ]
+    notes = check_mod._artifact_notifications(_artifact_state(rows), [])
+    by_name = {n["name"]: n for n in notes}
+    assert by_name["computeq"]["fix"] == "skill-manager sync deploy-helm", (
+        "an artifact stale because its upstream store is stale must be told to "
+        "fix the STORE; `skt build` re-derives from the same wrong input")
+    assert by_name["deploy-helm"]["fix"] == "skill-manager sync deploy-helm", (
+        "the root-cause row itself: `build` has no producer for a unit-store")
+
+
+def test_an_artifact_stale_on_its_own_inputs_still_gets_skt_build():
+    """The narrowing must not swallow the case `skt build` is FOR.
+
+    Its upstream store is present in `because` but is NOT stale, so the
+    artifact's own re-derived fingerprint is the news and building it is
+    exactly right.
+    """
+    rows = [
+        {"id": "cli-shim:pip/pytest", "name": "pytest",
+         "because": ["unit-store:spec-double-compiler"],
+         "reason": "its output bin/cli/pytest is not there"},
+    ]
+    notes = check_mod._artifact_notifications(_artifact_state(rows), [])
+    assert notes[0]["fix"] == "skt build pytest"
+
+
+def test_the_remedy_is_still_shell_quoted():
+    """`jinja2-cli[yaml]` is a real artifact name and unquoted it is a glob."""
+    rows = [{"id": "cli-shim:pip/jinja2", "name": "jinja2-cli[yaml]", "because": [],
+             "reason": "gone"}]
+    notes = check_mod._artifact_notifications(_artifact_state(rows), [])
+    assert notes[0]["fix"] == "skt build 'jinja2-cli[yaml]'"
+
+
+def test_the_root_cause_is_visible_even_though_it_is_not_rebuildable():
+    """`rows` holds only REBUILDABLE artifacts, and a unit-store is not one.
+
+    That omission is what hid the root cause from the reader choosing the
+    remedy. `stale_stores` carries it separately.
+    """
+    state = {
+        "state": "ok",
+        "stale_stores": ["deploy-helm"],          # not present in `rows` at all
+        "rows": [
+            {"id": "provisioned-tree:cache/x", "name": "computeq",
+             "because": ["unit-store:deploy-helm"], "reason": "built from a stale store"},
+        ],
+    }
+    notes = check_mod._artifact_notifications(state, [])
+    assert notes[0]["fix"] == "skill-manager sync deploy-helm"
