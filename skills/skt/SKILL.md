@@ -9,6 +9,21 @@ One CLI for the questions every session has and nobody used to answer:
 *what is loaded, where am I standing, is anything stale, and how does my
 skill edit survive this worktree?*
 
+> **Orienting yourself? Run `skt status` and stop reading.** It answers all
+> four of the questions a session starts with — which home tier you are in,
+> what is above it, the exact command that carries an edit out of this home,
+> and which homes you must never write — in about 360 tokens. **Everything
+> below this line is reference, and reading it to orient yourself costs
+> roughly forty times more than running the command.**
+>
+> That number is measured, not asserted. Fresh agents inheriting nothing were
+> asked those four questions against a real home: they answered the tier from
+> `skt status` and then went hunting for the other three, spending 10,879
+> tokens at the worktree tier and 21,186 at the root tier — reading a
+> 13,000-token reference page and, at root, skt's own Python source. The
+> command already knew every answer. It just did not say the last three out
+> loud, and this page did not tell anyone to stop.
+
 ```bash
 skt status            # startup report: units, plugins, home tier, epic/ticket state
 skt check             # new-version-available, recorded unit errors, stale artifacts

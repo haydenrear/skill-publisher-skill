@@ -57,6 +57,37 @@ def _age(seconds: int) -> str:
     return f"{seconds // 3600}h ago"
 
 
+def _promotion(home: Path, start: str | Path) -> dict:
+    """Where an edit made in THIS home goes, and what must not be written.
+
+    The tier line alone was never enough. Measured against fresh agents that
+    inherit nothing (skill-manager's disclosure-cost eval, 2026-08-25): asked
+    "which tier am I, what does this home inherit, how does my edit reach the
+    tier above and the unit's own repo, what must I never write", agents
+    answered the FIRST question from `skt status` and then went looking for the
+    other three -- reading a 13,000-token reference page and, at the root tier,
+    skt's own Python source. 10,879 tokens at the worktree tier and 21,186 at
+    root, against a 2,000-token budget.
+
+    `skt publish` already knew the answer. It just never said it out loud
+    anywhere an agent would look before it had a reason to run publish. So this
+    asks `publish._parent_home` -- the SAME resolver, not a second spelling of
+    it, which is the mistake this whole family of bugs is made of -- and status
+    reports what publish would do.
+
+    Imported inside the function on purpose: `publish` pulls in `.check`, and a
+    module-level import here would put that on the path of every session's
+    first command for a string.
+    """
+    from .publish import _parent_home
+
+    try:
+        parent, error = _parent_home(home, start)
+    except Exception as exc:  # a status line must never be the thing that fails
+        return {"parent": None, "error": f"could not resolve the tier above ({exc})"}
+    return {"parent": str(parent) if parent else None, "error": error}
+
+
 def collect(start: str | Path = ".") -> dict:
     home = homes.find_home(start)
     if home is None:
@@ -89,6 +120,7 @@ def collect(start: str | Path = ".") -> dict:
             "ticket_in_plan": tctx.spec_ticket_in_plan,
         },
         "cli_tools": homes.read_cli_tools(home),
+        "promotion": _promotion(home, start),
         "worktree_sync": (
             {
                 "parent_head": sync.parent_head[:8],
@@ -162,6 +194,41 @@ def _artifact_lines(block: dict | None) -> list[str]:
     return lines
 
 
+def _promotion_lines(report: dict) -> list[str]:
+    """Three lines that answer the three questions the tier line does not.
+
+    Kept to three, and kept here rather than in a reference page, because the
+    finding was not "this is undocumented" -- it is documented at length. The
+    finding is that the documentation costs 13,000 tokens to reach and this
+    costs about ninety.
+    """
+    promo = report.get("promotion") or {}
+    parent, error = promo.get("parent"), promo.get("error")
+    home = report["home"]
+    if parent:
+        return [
+            f"parent     {parent} — this home was cloned from it and syncs back to it",
+            "publish    edited a unit here? `skt publish <unit>` — syncs it to the parent "
+            "above, then publishes to the unit's own git repo. Nothing else carries an "
+            "edit out of this home; git does not.",
+            f"writes     this session writes {home}. Never write {parent}, or any other "
+            "home, by hand.",
+        ]
+    if error:
+        return [
+            f"parent     UNRESOLVED: {error}",
+            "publish    `skt publish` will REFUSE until that is fixed. Do not hand-copy "
+            "the unit into another home instead.",
+            f"writes     this session writes {home}. Never write another home by hand.",
+        ]
+    return [
+        "parent     none — this IS the root home; nothing is above it",
+        "publish    edited a unit here? `skt publish <unit>` — no sync leg at this tier, "
+        "it goes straight to the unit's own git repo.",
+        f"writes     this session writes {home}. Never write another home by hand.",
+    ]
+
+
 def render_text(report: dict) -> str:
     if report.get("home") is None:
         return f"skt status: {report['error']}"
@@ -179,6 +246,7 @@ def render_text(report: dict) -> str:
     if report["drift_pending"]:
         home_line += ", DRIFT PENDING (launch will refuse; ack with: skill-manager home drift --ack)"
     lines.append(home_line)
+    lines += _promotion_lines(report)
     spec = report["spec_workflow"]
     if spec["name"]:
         open_part = (
