@@ -317,7 +317,8 @@ def test_root_status_says_there_is_nothing_above(tmp_path, monkeypatch):
     # (None, None) is the root tier -- nothing above BY DESIGN, which is a
     # different statement from "could not work it out", and the text has to
     # make that difference legible or an agent will go looking for a parent.
-    assert report["promotion"] == {"parent": None, "error": None}
+    assert report["promotion"]["parent"] is None
+    assert report["promotion"]["error"] is None
     text = status.render_text(report)
     assert "none — this IS the root home" in text
     assert "straight to the unit's own git repo" in text
@@ -354,3 +355,46 @@ def test_a_raising_resolver_cannot_break_the_status_line(tmp_path, monkeypatch):
     report = status.collect(repo)
     assert "could not resolve the tier above" in report["promotion"]["error"]
     assert "units" in status.render_text(report)
+
+
+def test_the_descent_record_answers_when_the_tier_convention_cannot(tmp_path, monkeypatch):
+    """A home that has been copied still knows where it came from.
+
+    `_parent_home` derives the tier above from PATH SHAPE. Copy a home, or
+    inspect it from a sandbox with a redirected HOME, and that derivation
+    misses -- while `home.provenance.json`, which `home clone` WROTE, names the
+    source on disk. Measured in skill-manager's disclosure-cost sandbox: status
+    printed "parent UNRESOLVED: operator root home not found" directly above a
+    record that named the parent.
+    """
+    repo = make_repo(tmp_path / "repo")
+    home = make_home(repo, units={"alpha": {}})
+    (home / "home.provenance.json").write_text(
+        json.dumps({"clonedFrom": "/somewhere/else/.skill-manager",
+                    "parentStores": ["/the/root/.skill-manager"]})
+    )
+    monkeypatch.setattr(
+        "skt.publish._parent_home",
+        lambda h, s: (None, "operator root home not found at /nope"),
+    )
+    report = status.collect(repo)
+    assert report["promotion"]["parent"] == "/somewhere/else/.skill-manager"
+    assert report["promotion"]["error"] is None
+    assert report["promotion"]["from"] == "descent record"
+    text = status.render_text(report)
+    assert "descent record" in text, "where the answer came from is stated, not implied"
+    assert "UNRESOLVED" not in text
+
+
+def test_no_descent_record_still_reports_the_tier_failure(tmp_path, monkeypatch):
+    """The fallback must not swallow a genuine failure into silence."""
+    repo = make_repo(tmp_path / "repo")
+    make_home(repo, units={"alpha": {}})
+    monkeypatch.setattr(
+        "skt.publish._parent_home",
+        lambda h, s: (None, "operator root home not found at /nope"),
+    )
+    report = status.collect(repo)
+    assert report["promotion"]["parent"] is None
+    assert "operator root home not found" in report["promotion"]["error"]
+    assert "UNRESOLVED" in status.render_text(report)

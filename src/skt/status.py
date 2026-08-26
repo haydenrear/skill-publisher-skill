@@ -84,8 +84,40 @@ def _promotion(home: Path, start: str | Path) -> dict:
     try:
         parent, error = _parent_home(home, start)
     except Exception as exc:  # a status line must never be the thing that fails
-        return {"parent": None, "error": f"could not resolve the tier above ({exc})"}
-    return {"parent": str(parent) if parent else None, "error": error}
+        parent, error = None, f"could not resolve the tier above ({exc})"
+    if parent is not None or error is None:
+        return {"parent": str(parent) if parent else None, "error": error, "from": "tier"}
+    # THE CONVENTION FAILED AND THE ANSWER IS ON DISK. `_parent_home` derives the
+    # tier above from PATH SHAPE -- the main working tree for a worktree, the
+    # operator root for a project. When a home has been copied, mounted or is
+    # being inspected from outside its usual location, that derivation misses,
+    # and `home.provenance.json` -- which `home clone` WROTE, recording the home
+    # this one actually descends from -- is sitting unread beside it.
+    #
+    # Measured: in a sandbox whose HOME is redirected, a project-tier home
+    # reported "parent UNRESOLVED: operator root home not found" while its own
+    # descent record named the source home on the line above. A record written
+    # by one command and read by none is this codebase's most repeated defect
+    # shape; this is one fewer of them.
+    recorded = _descent_parent(home)
+    if recorded:
+        return {"parent": recorded, "error": None, "from": "descent record"}
+    return {"parent": None, "error": error, "from": "tier"}
+
+
+def _descent_parent(home: Path) -> str | None:
+    """`clonedFrom` from this home's descent record, else its first parent store."""
+    try:
+        record = json.loads((home / "home.provenance.json").read_text())
+    except Exception:
+        return None
+    cloned = record.get("clonedFrom")
+    if isinstance(cloned, str) and cloned:
+        return cloned
+    stores = record.get("parentStores")
+    if isinstance(stores, list) and stores and isinstance(stores[0], str):
+        return stores[0]
+    return None
 
 
 def collect(start: str | Path = ".") -> dict:
@@ -206,8 +238,10 @@ def _promotion_lines(report: dict) -> list[str]:
     parent, error = promo.get("parent"), promo.get("error")
     home = report["home"]
     if parent:
+        via = promo.get("from")
+        how = " (from this home's descent record)" if via == "descent record" else ""
         return [
-            f"parent     {parent} — this home was cloned from it and syncs back to it",
+            f"parent     {parent}{how} — this home was cloned from it and syncs back to it",
             "publish    edited a unit here? `skt publish <unit>` — syncs it to the parent "
             "above, then publishes to the unit's own git repo. Nothing else carries an "
             "edit out of this home; git does not.",
