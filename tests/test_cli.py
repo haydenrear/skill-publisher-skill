@@ -29,7 +29,27 @@ def test_help_runs_clean():
 def test_version():
     result = run("--version")
     assert result.returncode == 0
-    assert result.stdout.strip() == "skt 0.6.0"
+    from skt import __version__ as pkg_version
+    assert result.stdout.strip() == f"skt {pkg_version}"
+
+
+def test_the_two_version_literals_agree():
+    """`skt.cli` must keep its own copy, so something has to check it.
+
+    cli.py is stdlib-only by contract -- the skill-script installer runs
+    it with the system python3 and no venv -- so it cannot import the
+    package to learn the version, and the duplicate literal is deliberate.
+    What is NOT acceptable is the duplicate drifting silently: the 0.7.0
+    bump moved three manifests and `skt/__init__.py`, left this one at
+    0.6.0, and every test still passed because the only assertion read
+    the stale copy.
+    """
+    from skt import __version__ as pkg_version
+    from skt.cli import __version__ as cli_version
+    assert cli_version == pkg_version, (
+        f"skt.cli.__version__ is {cli_version} but the package says "
+        f"{pkg_version} — bump both, they cannot import each other"
+    )
 
 
 def test_no_args_prints_help():
