@@ -25,8 +25,8 @@ skill edit survive this worktree?*
 > loud, and this page did not tell anyone to stop.
 
 ```bash
-skt status            # startup report: units, plugins, home tier, epic/ticket state
-skt check             # new-version-available, recorded unit errors, stale artifacts
+skt status            # startup report: units, plugins, home tier, epic/ticket state, CLI version
+skt check             # new-version-available, unit errors, stale artifacts, a stale skill-manager
 skt sync <unit>       # pull a unit to its latest pushed source
 skt ticket new <T>    # ticket worktree + its own Skill Manager home, one command
 skt ticket close <T>  # teardown through the close-out gate

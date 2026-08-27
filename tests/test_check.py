@@ -546,3 +546,94 @@ def test_the_root_cause_is_visible_even_though_it_is_not_rebuildable():
     }
     notes = check_mod._artifact_notifications(state, [])
     assert notes[0]["fix"] == "skill-manager sync deploy-helm"
+
+
+# ------------------------------------------------------- the CLI's own version
+
+
+def test_version_parsing_refuses_what_it_cannot_compare():
+    """A version this cannot read is UNKNOWN, never string-compared.
+
+    `0.9.0` sorts after `0.25.1` lexically, so a fallback to string
+    comparison would tell an operator on the newest build that they were
+    behind — and a false "you are behind" costs more trust than a missing
+    notification ever does.
+    """
+    assert check_mod._parse_version("0.25.1") == (0, 25, 1)
+    assert check_mod._parse_version("0.25.1-rc1") == (0, 25, 1)
+    assert check_mod._parse_version("1.0") == (1, 0)
+    for bad in ("", "v0.25.1", "main", "0.x.1", "0", "1.2.3.4.5"):
+        assert check_mod._parse_version(bad) is None, bad
+    # The ordering the whole notification rests on.
+    assert check_mod._parse_version("0.25.1") > check_mod._parse_version("0.9.0")
+
+
+def test_brew_outdated_exits_non_zero_when_something_is_outdated(monkeypatch):
+    """THE TRAP, and it is inverted from the obvious reading.
+
+    `brew outdated` exits NON-ZERO precisely when a formula IS outdated.
+    Gating on the exit status therefore reports "nothing to compare" in
+    exactly the case worth reporting — measured live on 2026-08-27 against
+    a real 0.25.0 -> 0.25.1 gap, which this probe silently missed until
+    the status check came out.
+    """
+    payload = json.dumps({"formulae": [
+        {"name": "haydenrear/skill-manager/skill-manager",
+         "installed_versions": ["0.25.0"], "current_version": "0.25.1"}
+    ]})
+
+    def fake_run(argv, timeout, env=None):
+        assert argv[0] == "brew"
+        return subprocess.CompletedProcess(argv, 1, payload, "")  # rc=1 ON PURPOSE
+
+    monkeypatch.setattr(check_mod, "_run_git", fake_run)
+    latest, why = check_mod._brew_latest(5.0)
+    assert latest == "0.25.1", why
+
+
+def test_a_missing_brew_is_silence_not_a_notification(monkeypatch):
+    """`unknown-latest` never produces a notification.
+
+    "I could not find out" is not "you are current" — which is why the
+    state is typed rather than collapsed to None — but it is also not
+    grounds to tell an agent to run an upgrade. On a Linux box or a
+    non-brew install there is simply nothing to say.
+    """
+    monkeypatch.setattr(check_mod, "_run_git", lambda *a, **k: None)
+    latest, why = check_mod._brew_latest(5.0)
+    assert latest is None and why
+
+    state = {"state": "unknown-latest", "installed": "0.25.0", "reason": why}
+    assert check_mod._cli_notifications(state) == []
+
+
+def test_the_notification_fires_only_when_behind():
+    behind = {"state": "ok", "installed": "0.25.0", "latest": "0.25.1", "outdated": True}
+    notes = check_mod._cli_notifications(behind)
+    assert len(notes) == 1
+    note = notes[0]
+    assert note["kind"] == "cli-version"
+    assert "0.25.0" in note["message"] and "0.25.1" in note["message"]
+    assert note["fix"] == "skill-manager upgrade --self"
+
+    current = {"state": "ok", "installed": "0.25.1", "latest": "0.25.1", "outdated": False}
+    assert check_mod._cli_notifications(current) == []
+    # A home AHEAD of brew -- a local build -- is not behind, and must not
+    # be told to "upgrade" back down to the formula.
+    ahead = {"state": "ok", "installed": "0.26.0", "latest": "0.25.1", "outdated": False}
+    assert check_mod._cli_notifications(ahead) == []
+
+
+def test_the_remedy_is_rendered_on_its_own_line():
+    """Retypable without editing, like the stale-artifact remedy."""
+    report = {
+        "home": "/tmp/h", "tier": "root", "checked_units": ["a"],
+        "notifications": [{
+            "kind": "cli-version", "installed": "0.25.0", "latest": "0.25.1",
+            "message": "skill-manager 0.25.0 is installed here, and 0.25.1 is available",
+            "fix": "skill-manager upgrade --self",
+        }],
+    }
+    text = check_mod.render_text(report)
+    assert "    upgrade with: skill-manager upgrade --self" in text
+    assert "    then re-check this home: skt check" in text
