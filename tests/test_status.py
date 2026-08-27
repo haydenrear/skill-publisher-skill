@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -398,3 +399,49 @@ def test_no_descent_record_still_reports_the_tier_failure(tmp_path, monkeypatch)
     assert report["promotion"]["parent"] is None
     assert "operator root home not found" in report["promotion"]["error"]
     assert "UNRESOLVED" in status.render_text(report)
+
+
+# ------------------------------------------------ which binary is this session
+
+
+def test_status_names_the_cli_version_whether_or_not_it_is_behind(tmp_path):
+    """Orientation, not a warning.
+
+    "Which skill-manager am I running" is a question an agent has to answer
+    before any other line means anything — which is exactly what tripped
+    agents up before this existed — so the line is unconditional. Only the
+    ESCALATION to a notification is conditional, and that is `skt check`'s.
+    """
+    import json as _json
+    repo = make_repo(tmp_path / "repo")
+    home = make_home(repo)
+    cache = home / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+
+    def record(cli_block):
+        (cache / "skt-check.json").write_text(_json.dumps(
+            {"schema": 5, "checked_at": time.time(), "cli": cli_block}))
+
+    record({"state": "ok", "installed": "0.25.1", "latest": "0.25.1", "outdated": False})
+    text = status.render_text(status.collect(repo))
+    assert "cli-ver    skill-manager 0.25.1" in text
+    assert "available" not in text, "a current CLI is stated, never advertised"
+
+    record({"state": "ok", "installed": "0.25.0", "latest": "0.25.1", "outdated": True})
+    text = status.render_text(status.collect(repo))
+    assert "0.25.0" in text and "0.25.1 is available" in text
+    # The remedy belongs to `skt check`. Two surfaces printing the same
+    # command is how they drift apart.
+    assert "upgrade --self" not in text
+
+
+def test_status_survives_a_record_written_before_the_cli_block(tmp_path):
+    """A schema-4 record has no `cli` key, and must render as it always did."""
+    import json as _json
+    repo = make_repo(tmp_path / "repo")
+    home = make_home(repo)
+    cache = home / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "skt-check.json").write_text(_json.dumps({"schema": 4, "checked_at": time.time()}))
+    text = status.render_text(status.collect(repo))
+    assert "cli-ver" not in text

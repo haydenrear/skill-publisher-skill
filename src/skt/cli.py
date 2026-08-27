@@ -10,7 +10,14 @@ from __future__ import annotations
 import argparse
 import sys
 
-__version__ = "0.6.0"
+# A SECOND COPY, and it has to be one. `from . import __version__` would
+# import the package __init__, which imports .artifacts -- breaking the
+# stdlib-only contract in this module's docstring, under which the
+# installer runs this file with the system python3 and no venv. So the
+# literal stays, and `test_the_two_version_literals_agree` fails when it
+# drifts from the package's: this bump missed it, and `skt --version`
+# said 0.6.0 while the package said 0.7.0 with every test green.
+__version__ = "0.7.0"
 
 # Subcommand -> (implementing ticket, issue URL) for honest stubs.
 # Empty since SKT-5; kept for future subcommands landing across tickets.

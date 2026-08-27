@@ -123,7 +123,14 @@ from . import homes
 # consumer filtering on `kind == "new-version"` sees FEWER rows than a v3
 # record would have shown for the same home, because a store-blocking
 # error now replaces that unit's pull prompt rather than riding beside it.
-SCHEMA_VERSION = 4
+# 5: the record gained `cli` and notifications of kind `cli-version`
+# (skill-manager#265's follow-on). Additive on the established terms — an
+# older record has no `cli` key and every reader uses `.get` — and it fills
+# the one gap that made every OTHER notification untrustworthy: skt could
+# say a home's units were current while the binary reading them was a
+# release behind, because skill-manager is a brew formula rather than a
+# change-managed unit and nothing here had ever looked at it.
+SCHEMA_VERSION = 5
 DEFAULT_TTL_SECONDS = 900
 NOTIFY_EXIT = 10
 REMOTE_TIMEOUT_SECONDS = 10
@@ -157,6 +164,27 @@ MAX_ARTIFACT_NOTIFICATIONS = 3
 # so an operator who has measured a reason can turn one probe off.
 ARTIFACTS_ENV = "SKT_ARTIFACTS"
 
+# The CLI-version probe's slice of the shared budget: one call into this
+# home's own pin (measured floor ~1.2 s) plus up to two brew reads, which
+# are local formula-cache lookups and do not touch the network.
+#
+# MEASURED COST, 2026-08-27, operator root home: +2.2 s on a live pass
+# (1.00 s -> 3.17 s). That is affordable because the SessionStart hook is
+# cache-FIRST -- it serves `check --cached` and only refreshes live on a
+# TTL miss, and PostToolUse never refreshes at all -- so the 2.2 s is paid
+# at most once per DEFAULT_TTL_SECONDS per home, not once per session.
+# If that ordering ever inverts, this probe is the first thing to re-time.
+CLI_VERSION_BUDGET_SECONDS = 5
+
+# Opt-OUT, on the same terms as ARTIFACTS_ENV: on in every session, and the
+# switch exists only for an operator who has measured a reason to spend
+# nothing here.
+CLI_VERSION_ENV = "SKT_CLI_VERSION"
+
+# The tap formula `skill-manager upgrade --self` upgrades, and therefore the
+# only thing whose "newer one exists" answer matches that remedy.
+BREW_FORMULA = "skill-manager"
+
 # Recorded `errors[*].kind` values that describe the STORE CHECKOUT's own
 # git state — the three whose remedy in skill-manager's own
 # `ReportUseCase.hint` is an action IN the store directory rather than a
@@ -178,22 +206,36 @@ ARTIFACTS_ENV = "SKT_ARTIFACTS"
 STORE_BLOCKING_ERRORS = ("MERGE_CONFLICT", "NO_GIT_REMOTE", "NEEDS_GIT_MIGRATION")
 
 
-def _run_git(argv: list[str], timeout: float) -> subprocess.CompletedProcess | None:
-    """Bounded git call; None on deadline. Kills the child's WHOLE group.
+def _run_git(argv: list[str], timeout: float,
+             env: dict | None = None) -> subprocess.CompletedProcess | None:
+    """Bounded call; None on deadline. Kills the child's WHOLE group.
 
     `subprocess.run(timeout=)` kills only the direct child; git spawns
     helpers (ssh, credential fillers) that inherit the pipes and keep
     the caller open past its budget. Own session + killpg reaps the lot.
+
+    Named for its first caller, but the mechanism is not git-specific and
+    the CLI/brew probes below reuse it. `env` exists for those: invoking a
+    home's own CLI pin requires stripping SKILL_MANAGER_CLI first, or an
+    older unguarded pin execs itself forever (see publish._cli_env).
     """
     if timeout <= 0:
         return None  # budget already spent: do not spawn at all
-    proc = subprocess.Popen(
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+            env=env,
+        )
+    except OSError:
+        # argv[0] is not on PATH, or is not executable. Identical in
+        # consequence to a call that never answered, and a SessionStart
+        # hook must never turn that into a traceback -- `brew` is simply
+        # absent on a Linux box or a non-brew install.
+        return None
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -392,6 +434,170 @@ def _artifact_state(home: Path, deadline: float) -> dict:
     }
 
 
+def _parse_version(text: str) -> tuple[int, ...] | None:
+    """`0.25.1` -> (0, 25, 1). None if it is not a dotted numeric version.
+
+    Deliberately strict. A version this cannot read is reported as unknown
+    rather than compared as a string: `0.9.0` sorts after `0.25.1`
+    lexically, and a false "you are behind" costs more trust than a
+    missing notification.
+    """
+    parts = text.strip().split(".")
+    if not (2 <= len(parts) <= 4):
+        return None
+    out = []
+    for part in parts:
+        digits = part.split("-", 1)[0].split("+", 1)[0]
+        if not digits.isdigit():
+            return None
+        out.append(int(digits))
+    return tuple(out)
+
+
+def _installed_cli_version(home: Path, timeout: float) -> tuple[str | None, str]:
+    """The version of the CLI THIS HOME runs, not the one brew installed.
+
+    The distinction is the whole point. `skill-manager` on PATH is usually
+    a home's shim, and a home may pin a build that is not brew's — so
+    asking brew what is installed answers a question about the machine
+    when the question is about this home. Measured on 2026-08-27: the
+    operator's root home shim, the project home shim and brew all agreed,
+    but only because a migration had just repointed 23 dead pins.
+    """
+    from .publish import _cli, _cli_env
+
+    cli = _cli(home)
+    if not cli.is_file():
+        return None, f"this home has no skill-manager CLI pin at {cli}"
+    proc = _run_git([str(cli), "--version"], timeout, env=_cli_env())
+    if proc is None:
+        return None, "the CLI did not answer --version inside its budget"
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return None, f"{cli} --version exited {proc.returncode}" + (
+            f": {detail[0]}" if detail else ""
+        )
+    # `skill-manager 0.25.0`, then `build:` and `cli:` lines.
+    first = (proc.stdout or "").strip().splitlines()
+    if not first:
+        return None, "the CLI printed no version line"
+    token = first[0].split()
+    if len(token) < 2 or _parse_version(token[-1]) is None:
+        return None, f"could not read a version from {first[0]!r}"
+    return token[-1], ""
+
+
+def _brew_latest(timeout: float) -> tuple[str | None, str]:
+    """The newest skill-manager brew can install right now.
+
+    Two reads, both against brew's LOCAL formula cache — no network. That
+    is the limitation worth stating rather than hiding: brew learns about
+    a release when its tap is fetched, so a machine that has not run `brew
+    update` recently will report the version it last saw. The answer is
+    therefore a floor on how far behind the home is, never a ceiling, and
+    the notification is worded as one.
+    """
+    outdated = _run_git(
+        ["brew", "outdated", "--json=v2", BREW_FORMULA], min(timeout, 3.0)
+    )
+    if outdated is None:
+        return None, "brew is not available, or did not answer inside its budget"
+    # NOT gated on the exit status, and this is the whole subtlety: `brew
+    # outdated` exits NON-ZERO precisely when something IS outdated, so
+    # treating that as failure inverts the check and reports "nothing to
+    # compare" in exactly the case worth reporting. Measured here on
+    # 2026-08-27 against a real 0.25.0 -> 0.25.1 gap. The JSON parsing is
+    # the real predicate: unreadable output is the failure, not rc.
+    try:
+        listed = (json.loads(outdated.stdout or "{}").get("formulae") or [])
+    except json.JSONDecodeError:
+        return None, "brew could not report on the skill-manager formula"
+    for row in listed:
+        current = (row.get("current_version") or "").strip()
+        if current and _parse_version(current):
+            return current, ""
+    # Nothing outdated, so whatever brew HOLDS is the newest it knows of.
+    have = _run_git(["brew", "list", "--versions", BREW_FORMULA], min(timeout, 2.0))
+    if have is None or have.returncode != 0:
+        return None, "brew knows of no installed skill-manager formula"
+    words = (have.stdout or "").split()
+    for word in reversed(words):
+        if _parse_version(word):
+            return word, ""
+    return None, "could not read a version from brew list"
+
+
+def _cli_state(home: Path, deadline: float) -> dict:
+    """The `cli` block: which skill-manager this home runs, and whether a
+    newer one is installable. LIVE PATH ONLY.
+
+    A typed `state` on every path, for the same reason `_artifact_state`
+    has one -- so a reader can tell "up to date" from "could not ask":
+
+      ok              `installed` and `latest` both known and compared
+      unknown-latest  the home's version is known; nothing could say what
+                      the newest is (no brew, not a brew install)
+      no-cli          this home holds no CLI pin to ask
+      timeout         the probe did not finish inside its slice
+      error           anything else, with the reason attached
+      off             SKT_CLI_VERSION=0
+    """
+    if os.environ.get(CLI_VERSION_ENV, "").strip() in ("0", "false", "no"):
+        return {"state": "off", "reason": f"{CLI_VERSION_ENV} is set to off"}
+
+    budget = min(float(CLI_VERSION_BUDGET_SECONDS), deadline - time.monotonic())
+    if budget <= 0:
+        return {"state": "timeout", "reason": "the shared budget was spent before this probe"}
+
+    installed, why = _installed_cli_version(home, budget)
+    if installed is None:
+        state = "no-cli" if "CLI pin" in why else (
+            "timeout" if "budget" in why else "error"
+        )
+        return {
+            "state": state,
+            "reason": why,
+            "fix": f"skill-manager home shims --root {home}   # re-writes the pin",
+        }
+
+    latest, why_latest = _brew_latest(max(0.5, deadline - time.monotonic()))
+    if latest is None:
+        return {"state": "unknown-latest", "installed": installed, "reason": why_latest}
+
+    behind = _parse_version(installed) < _parse_version(latest)
+    return {
+        "state": "ok",
+        "installed": installed,
+        "latest": latest,
+        "outdated": behind,
+    }
+
+
+def _cli_notifications(state: dict) -> list[dict]:
+    """One notification, and only when this home is demonstrably behind.
+
+    Never fires on `unknown-latest`: "I could not find out" is not
+    "you are current", but it is also not grounds to tell an agent to
+    upgrade. The silence is the honest answer there.
+    """
+    if state.get("state") != "ok" or not state.get("outdated"):
+        return []
+    installed = state["installed"]
+    latest = state["latest"]
+    return [
+        {
+            "kind": "cli-version",
+            "installed": installed,
+            "latest": latest,
+            "message": (
+                f"skill-manager {installed} is installed here, and {latest} is available "
+                f"— this session's commands run the older one"
+            ),
+            "fix": "skill-manager upgrade --self",
+        }
+    ]
+
+
 def _blocking_error(unit: homes.Unit, store: Path | None) -> dict | None:
     """A `unit-error` notification, or None if nothing recorded blocks the store.
 
@@ -585,13 +791,17 @@ def _artifact_notifications(state: dict, unit_notes: list[dict]) -> list[dict]:
 
 
 def collect(start: str | Path = ".", *, use_network: bool = True,
-            probe_artifacts: bool = True) -> dict:
+            probe_artifacts: bool = True, probe_cli: bool = True) -> dict:
     """One live pass. `use_network` governs the REMOTE phase only.
 
     The artifact probe is local — it asks this home's own CLI about this
     home's own disk — so it is not covered by `use_network` and gets its
-    own switch rather than quietly widening that flag's meaning. Both are
-    bounded by the one shared deadline.
+    own switch rather than quietly widening that flag's meaning. The
+    CLI-version probe is local on the same terms and takes `probe_cli` for
+    the same reason: it is a SECOND spawn into this home's pin, and a
+    caller that asked for no local probes must be able to say so once per
+    probe rather than discover a new one. All three are bounded by the one
+    shared deadline.
     """
     home = homes.find_home(start)
     if home is None:
@@ -721,6 +931,16 @@ def collect(start: str | Path = ".", *, use_network: bool = True,
                             ),
                         }
                     )
+    # After the git phases, and BEFORE the artifact probe. The ordering
+    # against the git phases is the established one -- an added probe must
+    # not delay the unit notifications. The ordering against artifacts is
+    # deliberate and new: a home running a release-behind binary is the
+    # thing that explains why the other answers might be wrong, so when the
+    # budget is thin it is the one worth spending on. It is also the
+    # cheaper of the two.
+    cli = (_cli_state(home, deadline) if probe_cli
+           else {"state": "off", "reason": "probe_cli=False"})
+    notifications += _cli_notifications(cli)
     # LAST, and from what the git phases have left of the shared deadline.
     # Ordered after them so an added probe cannot make the established
     # unit notifications later than they already were; the cost is that a
@@ -743,6 +963,7 @@ def collect(start: str | Path = ".", *, use_network: bool = True,
         "schema": SCHEMA_VERSION,
         "home": str(home),
         "tier": tier,
+        "cli": cli,
         "artifacts": artifacts,
         "checked_units": checked,
         "unverifiable": unverifiable,
@@ -889,6 +1110,13 @@ def render_text(report: dict) -> str:
             # The command on its own line: this is the fast path for a
             # critical fix and it has to be retypable without editing.
             lines.append(f"    rebuild with: {note['fix']}")
+        elif note.get("kind") == "cli-version":
+            # Own line, same reason as the two below: this is the fast path
+            # for the fix, and it has to be retypable without editing. The
+            # second line says what to do AFTER, because an upgrade that
+            # leaves the homes unreconciled is the migration half-done.
+            lines.append(f"    upgrade with: {note['fix']}")
+            lines.append("    then re-check this home: skt check")
         elif note.get("kind") == "unit-error":
             # Same shape, and for the same reason — plus the home's own
             # recorded sentence, which names the remote, the branch and

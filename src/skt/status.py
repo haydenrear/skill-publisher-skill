@@ -20,7 +20,13 @@ from . import context as ctx_mod
 from . import homes
 
 # 2: the report gained `artifacts`, read back from the check record.
-SCHEMA_VERSION = 2
+# 3: the report gained `cli`, read back the same way. The version of
+# skill-manager a session is running is orientation, not a warning: it
+# belongs on the status line whether or not it is behind, because "which
+# binary am I" is a question an agent has to answer before any of the
+# other lines mean anything. `skt check` is what escalates a stale one to
+# a notification.
+SCHEMA_VERSION = 3
 MAX_TEXT_UNITS = 15
 # `MAX_TEXT_UNITS`' rule applied to the new dimension: the startup report is
 # injected into every session, so the artifact line names a few and counts
@@ -47,6 +53,51 @@ def read_artifact_counts(home: Path) -> dict | None:
     block["measured_at"] = raw.get("checked_at")
     block["age_seconds"] = max(0, int(time.time() - (raw.get("checked_at") or 0)))
     return block
+
+
+def read_cli_version(home: Path) -> dict | None:
+    """The `cli` block `skt check` last recorded, or None.
+
+    Same contract as {@link read_artifact_counts}: one file read, no
+    subprocess, and not gated on the TTL. A version fifteen minutes old is
+    still the version -- the binary does not change while nobody upgrades
+    it -- and the age rides on the line for the case where somebody just
+    did.
+    """
+    try:
+        raw = json.loads((home / "cache" / "skt-check.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    block = raw.get("cli")
+    if not isinstance(block, dict):
+        return None  # a record written before schema 5 has no cli half
+    block = dict(block)
+    block["age_seconds"] = max(0, int(time.time() - (raw.get("checked_at") or 0)))
+    return block
+
+
+def _cli_lines(block: dict | None) -> list[str]:
+    """One line, and it always says which binary this session runs.
+
+    The `outdated` case leads with the gap rather than the version,
+    because that is the fact that changes what the reader should do. It
+    stops at naming the gap: the remedy is `skt check`'s to print, and two
+    surfaces printing the same command is how they drift apart.
+    """
+    if not block:
+        return []
+    state = block.get("state")
+    installed = block.get("installed")
+    if state == "ok" and block.get("outdated"):
+        return [
+            f"cli-ver    skill-manager {installed} — {block.get('latest')} is available "
+            f"({_age(block.get('age_seconds', 0))}); `skt check` names the upgrade"
+        ]
+    if installed:
+        return [f"cli-ver    skill-manager {installed}"]
+    if state in (None, "off"):
+        return []
+    return [f"cli-ver    not measured ({state}): {block.get('reason', '')}"]
 
 
 def _age(seconds: int) -> str:
@@ -136,6 +187,7 @@ def collect(start: str | Path = ".") -> dict:
         "home": str(home),
         "tier": tctx.tier,
         "artifacts": read_artifact_counts(home),
+        "cli": read_cli_version(home),
         "policy": homes.read_policy(home),
         "drift_pending": homes.drift_pending(home),
         "checkout": {
@@ -328,6 +380,7 @@ def render_text(report: dict) -> str:
     if len(units) > MAX_TEXT_UNITS:
         lines.append(f"  … +{len(units) - MAX_TEXT_UNITS} more (skt status --json for all)")
     lines += _artifact_lines(report.get("artifacts"))
+    lines += _cli_lines(report.get("cli"))
     plugins = report["plugins"]
     lines.append(f"plugins    {', '.join(plugins) if plugins else 'none'}")
     lines.append("next       skt check — new-version and sync notifications")

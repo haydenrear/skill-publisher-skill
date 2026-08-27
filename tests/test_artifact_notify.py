@@ -572,9 +572,36 @@ def test_use_network_governs_the_remote_phase_only(tmp_path):
     check_mod.collect(repo, use_network=False)
     assert log.exists(), "a local probe is not governed by use_network"
     log.unlink()
-    report = check_mod.collect(repo, use_network=False, probe_artifacts=False)
+    report = check_mod.collect(repo, use_network=False, probe_artifacts=False,
+                               probe_cli=False)
     assert not log.exists()
     assert report["artifacts"]["state"] == "off"
+    assert report["cli"]["state"] == "off"
+
+
+def test_the_cli_version_probe_has_its_own_switch(tmp_path):
+    """A SECOND local spawn into the home's pin, so it takes a second
+    switch — the same rule the artifact probe established above. Turning
+    artifacts off must not silently turn this off, and vice versa: a
+    caller that gets one probe it did not ask for has been surprised
+    exactly the way `use_network` once surprised people."""
+    log = tmp_path / "argv.log"
+    repo = make_repo(tmp_path / "repo")
+    home = make_home(repo)
+    fake_cli(home, stdout=json.dumps(STALE_DOC), argv_log=log)
+
+    # artifacts off, cli on -> the pin is still asked, for --version
+    report = check_mod.collect(repo, use_network=False, probe_artifacts=False)
+    assert report["artifacts"]["state"] == "off"
+    assert report["cli"]["state"] != "off", "probe_artifacts must not govern this probe"
+    assert log.exists(), "the version probe spawns the home's pin"
+    log.unlink()
+
+    # cli off, artifacts on -> the pin is asked, but never for --version
+    report = check_mod.collect(repo, use_network=False, probe_cli=False)
+    assert report["cli"]["state"] == "off"
+    assert report["artifacts"]["state"] != "off", "probe_cli must not govern the artifact probe"
+    assert "--version" not in log.read_text(), "no version call when the switch is off"
 
 
 # --------------------------------------------------------- status read-back
