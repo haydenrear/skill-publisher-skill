@@ -560,15 +560,28 @@ def _cli_state(home: Path, deadline: float) -> dict:
             "fix": f"skill-manager home shims --root {home}   # re-writes the pin",
         }
 
+    # A LOCAL BUILD IS NOT BEHIND A RELEASE, it is beside it. skill-manager
+    # stamps a build suffix -- `0.25.0+g08a1c00d4503` -- on a CLI built from
+    # a checkout rather than installed from the tap, and a home running one
+    # is running what its operator is developing. Two things are then wrong
+    # with the ordinary reading: the base version says nothing about which
+    # commits the build carries (measured 2026-08-28, the operator's project
+    # home built `0.25.0+g08a1c00` from a branch that ALREADY CONTAINED
+    # every fix in the 0.25.1 release it was being told it was behind), and
+    # `upgrade --self` upgrades the tap, which cannot move a CLI this home
+    # builds itself. So: reported for orientation, never notified about.
+    local_build = "+" in installed
     latest, why_latest = _brew_latest(max(0.5, deadline - time.monotonic()))
     if latest is None:
-        return {"state": "unknown-latest", "installed": installed, "reason": why_latest}
+        return {"state": "unknown-latest", "installed": installed,
+                "local_build": local_build, "reason": why_latest}
 
-    behind = _parse_version(installed) < _parse_version(latest)
+    behind = (not local_build) and _parse_version(installed) < _parse_version(latest)
     return {
         "state": "ok",
         "installed": installed,
         "latest": latest,
+        "local_build": local_build,
         "outdated": behind,
     }
 
@@ -580,7 +593,10 @@ def _cli_notifications(state: dict) -> list[dict]:
     "you are current", but it is also not grounds to tell an agent to
     upgrade. The silence is the honest answer there.
     """
-    if state.get("state") != "ok" or not state.get("outdated"):
+    # `outdated` is already False for a local build, so this is belt and
+    # braces -- but the rule is worth stating where the notification is
+    # built, because the remedy below is the thing that would be wrong.
+    if state.get("state") != "ok" or not state.get("outdated") or state.get("local_build"):
         return []
     installed = state["installed"]
     latest = state["latest"]

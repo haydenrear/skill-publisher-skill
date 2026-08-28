@@ -17,7 +17,7 @@ import sys
 # literal stays, and `test_the_two_version_literals_agree` fails when it
 # drifts from the package's: this bump missed it, and `skt --version`
 # said 0.6.0 while the package said 0.7.0 with every test green.
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 # Subcommand -> (implementing ticket, issue URL) for honest stubs.
 # Empty since SKT-5; kept for future subcommands landing across tickets.

@@ -88,6 +88,14 @@ def _cli_lines(block: dict | None) -> list[str]:
         return []
     state = block.get("state")
     installed = block.get("installed")
+    if installed and block.get("local_build"):
+        # Named as what it is. A developer's home runs the checkout, and
+        # the release number beside it is context, not a target -- see
+        # `local_build` in check._cli_state for why it is never a
+        # notification.
+        latest = block.get("latest")
+        beside = f" (tap has {latest})" if latest else ""
+        return [f"cli-ver    skill-manager {installed} — local build{beside}"]
     if state == "ok" and block.get("outdated"):
         return [
             f"cli-ver    skill-manager {installed} — {block.get('latest')} is available "

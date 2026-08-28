@@ -637,3 +637,29 @@ def test_the_remedy_is_rendered_on_its_own_line():
     text = check_mod.render_text(report)
     assert "    upgrade with: skill-manager upgrade --self" in text
     assert "    then re-check this home: skt check" in text
+
+
+def test_a_local_build_is_beside_a_release_not_behind_it():
+    """MEASURED 2026-08-28 in the operator's own project home.
+
+    Its CLI was built from the epic branch and stamped
+    `0.25.0+g08a1c00d4503` — a build that ALREADY CONTAINED every fix in
+    the 0.25.1 release it was being told it was behind. The advice was
+    wrong twice: the base version says nothing about which commits a build
+    carries, and `upgrade --self` upgrades the tap, which cannot move a
+    CLI the home builds from a checkout.
+    """
+    local = {"state": "ok", "installed": "0.25.0+g08a1c00d4503",
+             "latest": "0.25.1", "local_build": True, "outdated": False}
+    assert check_mod._cli_notifications(local) == []
+
+    # Belt and braces: even if `outdated` were set, the remedy is still
+    # one this home cannot act on, so the flag alone must suppress it.
+    contradictory = dict(local, outdated=True)
+    assert check_mod._cli_notifications(contradictory) == []
+
+    # A tap-installed CLI at the same base version IS behind, and the
+    # notification must survive — this is the case the whole feature is for.
+    tapped = {"state": "ok", "installed": "0.25.0", "latest": "0.25.1",
+              "local_build": False, "outdated": True}
+    assert len(check_mod._cli_notifications(tapped)) == 1
