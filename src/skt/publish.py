@@ -17,12 +17,12 @@ unit failed the command and stopped the publish. A CLI too old to know
 from __future__ import annotations
 
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 from . import context as ctx_mod
 from . import homes
+from . import relay as relay_mod
 from .check import (
     LOCAL_TIMEOUT_SECONDS,
     NETWORK_BUDGET_SECONDS,
@@ -132,6 +132,41 @@ def _cli_env() -> dict:
     env = dict(os.environ)
     env.pop("SKILL_MANAGER_CLI", None)
     return env
+
+
+def _refusal_fix(home: Path, rerun: str):
+    """The remedy for a cross-home refusal — which is never "upgrade".
+
+    A `bin/cli` shim binds the home it LIVES in, so it cannot honour a
+    `SKILL_MANAGER_HOME` naming a different one and refuses (exit 79)
+    rather than editing the other silently. Two different mistakes reach
+    that refusal, and they have opposite remedies:
+
+    - the shim serves a home that is not this one — a pin with a foreign
+      path in its body, which is what `HomeCloner.Kind.FOREIGN_PATH_IN_SHIM`
+      detects and what the epic's own baseline counted 19 of. The pin is
+      the wrong thing and regenerating it is the fix.
+    - the environment names a home this home's pin does not serve. Then
+      the pin is right and the environment is what has to move.
+
+    The refusal names both homes, so this does not have to guess. Naming
+    another home's shim in `SKILL_MANAGER_CLI` is never the answer:
+    `_cli_env` strips that variable, and the shim would refuse again.
+    """
+
+    def build(relayed) -> str:
+        shim_home = relayed.shim_home
+        if shim_home and Path(shim_home) != Path(home):
+            return (
+                f"skill-manager home shims --root {home}   # this home's pin serves "
+                f"{shim_home}, not the home it lives in"
+            )
+        return (
+            f"SKILL_MANAGER_HOME={home} {rerun}   # this home's pin cannot run against "
+            f"a different home; make the environment agree with the home you meant"
+        )
+
+    return build
 
 
 def _run_cli(home: Path, *args: str) -> subprocess.CompletedProcess:
@@ -244,21 +279,28 @@ def run(unit_name: str | None, *, check_only: bool = False, ticket: str | None =
     if parent is not None:
         proc, narrowed = _sync_one_tier_up(home, parent, unit_name)
         if proc.returncode != 0:
-            print(f"error: home sync into {parent} failed (exit {proc.returncode})")
             if proc.returncode == UNKNOWN_UNIT_EXIT:
                 # The narrowed sync refused the NAME. Never retry whole-home
                 # here: that would publish under a different reconciliation
                 # than the one asked for.
-                print(f"fix:   no unit named {unit_name!r} in this home or its parent — "
-                      f"check `skt publish --check` for the name")
+                fix = (f"no unit named {unit_name!r} in this home or its parent — "
+                       f"check `skt publish --check` for the name")
             elif narrowed:
-                print(f"fix:   resolve the conflict reported in {unit_name}, then re-run "
-                      f"skt publish {unit_name}")
+                fix = (f"resolve the conflict reported in {unit_name}, then re-run "
+                       f"skt publish {unit_name}")
             else:
-                print("fix:   this CLI cannot sync one unit, so an unrelated unit can block "
-                      f"it — resolve the reported conflict, or upgrade {_cli(home)}, then "
-                      f"re-run skt publish {unit_name}")
-            sys.stdout.write(proc.stdout[-1500:] + proc.stderr[-1500:])
+                fix = ("this CLI cannot sync one unit, so an unrelated unit can block "
+                       f"it — resolve the reported conflict, or upgrade {_cli(home)}, then "
+                       f"re-run skt publish {unit_name}")
+            relay_mod.emit(
+                relay_mod.relay(
+                    relay_mod.label_for(_cli(home)),
+                    proc,
+                    reason=f"home sync into {parent} failed (exit {proc.returncode})",
+                    fix=fix,
+                    refusal_fix=_refusal_fix(home, f"skt publish {unit_name}"),
+                )
+            )
             return proc.returncode
         scope = f"{unit_name} only" if narrowed else "whole home"
         print(f"synced: this home -> {parent} ({scope}; one tier up; teardown-safe)")
@@ -269,9 +311,15 @@ def run(unit_name: str | None, *, check_only: bool = False, ticket: str | None =
         publish_args += ["--ticket", ticket]
     proc = _run_cli(home, *publish_args)
     if proc.returncode != 0:
-        print(f"error: unit publish for {unit_name} failed (exit {proc.returncode})")
-        print(f"fix:   {_cli(home)} unit publish {unit_name} --ticket <ticket> --verbose")
-        sys.stdout.write(proc.stdout[-1500:] + proc.stderr[-1500:])
+        relay_mod.emit(
+            relay_mod.relay(
+                relay_mod.label_for(_cli(home)),
+                proc,
+                reason=f"unit publish for {unit_name} failed (exit {proc.returncode})",
+                fix=f"{_cli(home)} unit publish {unit_name} --ticket <ticket> --verbose",
+                refusal_fix=_refusal_fix(home, f"skt publish {unit_name}"),
+            )
+        )
         return proc.returncode
     print(f"published: {unit_name} -> its own repository (branch skill/{ticket or '<ticket>'}-{unit_name})")
     print("This is the only copy that survives this machine; the PR it opened still needs review.")

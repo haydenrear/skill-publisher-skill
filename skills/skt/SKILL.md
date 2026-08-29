@@ -114,6 +114,41 @@ stash the message names is somebody's uncommitted work and any reset of
 the store destroys it. Resolve in the store directory, `git add` +
 `git commit`, and the next command clears the error by itself.
 
+## When a skt command relays a failure
+
+`skt ticket new`, `skt publish` and `skt sync` all shell out — to
+`bootstrap-home.sh`, or to this home's own `bin/cli/skill-manager` — and
+when one of those fails you get the child's own words, not a summary of
+them:
+
+```
+error: home bootstrap failed (exit 1); worktree and branch rolled back
+cause: skill-manager: refusing to run against a home you did not name.
+         you named:  /repo/wt-3/.skill-manager
+         this shim would have edited: /Users/x/.skill-manager
+fix:   skill-manager home shims --root /repo/wt-3/.skill-manager   # ...
+log:   /tmp/bootstrap-home-A3Uj8x.log
+--- bootstrap-home.sh said ---
+  <the whole output, or its head and tail with the elision counted>
+```
+
+Read it in this order and believe the `cause:` block over everything
+else — it is the child's text, lifted out so a long log cannot bury it.
+
+**Exit 79 is a cross-home refusal and is never a version problem.** A
+`bin/cli` shim binds the home it LIVES in and refuses when
+`SKILL_MANAGER_HOME` names a different one, rather than editing the
+other home silently. Upgrading anything changes nothing. Either the pin
+serves a home that is not the one it lives in — regenerate it with
+`skill-manager home shims --root <home>` — or the environment names a
+home this pin does not serve, and the environment is what moves. The
+refusal names both homes; the `fix:` line picks the right one of the two.
+
+Before skt 0.8.0 this printed only the child's LAST line, so a
+provisioning failure read as a dangling sentence fragment
+(skill-manager#264) and the diagnosis was only reachable by re-running
+the bootstrap by hand.
+
 ## Startup disclosure
 
 In Claude Code this plugin's `SessionStart` hook injects `skt status`
