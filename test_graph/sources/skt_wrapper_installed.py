@@ -110,8 +110,20 @@ def main(ctx):
             return NodeResult.fail(ctx.node_id, f"python {version}: {exc}")
         result.log(f"python {version} -> {interpreter}")
 
-        bin_dir = workdir / version / "bin" / "cli"
-        cache_dir = workdir / version / "cache"
+        # INSTALL FROM INSIDE THE HOME, because that is the only shape a
+        # real install has: skill-manager copies the unit into the home and
+        # then runs its install script with $SKILL_DIR pointing INTO that
+        # home. The old fixture pointed $SKILL_DIR at the checkout and
+        # $SKILL_MANAGER_HOME at an unrelated temp dir -- a pair that cannot
+        # occur in production, and the shape that let a frozen wrapper look
+        # correct here.
+        home_dir = workdir / version
+        bin_dir = home_dir / "bin" / "cli"
+        cache_dir = home_dir / "cache"
+        unit_dir = home_dir / "plugins" / "skt"
+        if not unit_dir.exists():
+            shutil.copytree(REPO_ROOT, unit_dir,
+                            ignore=shutil.ignore_patterns(".git", "test_graph", ".venv"))
         record = procs.run(
             ctx,
             f"install-skt-{version}",
@@ -121,8 +133,8 @@ def main(ctx):
                 SKT_PYTHON=interpreter,
                 SKILL_MANAGER_BIN_DIR=str(bin_dir),
                 SKILL_MANAGER_CACHE_DIR=str(cache_dir),
-                SKILL_DIR=str(REPO_ROOT),
-                SKILL_MANAGER_HOME=str(probe_home),
+                SKILL_DIR=str(unit_dir),
+                SKILL_MANAGER_HOME=str(home_dir),
             ),
         )
         result.process(record)
@@ -144,9 +156,22 @@ def main(ctx):
         # PATH, and it is the reason the installer probes at install time.
         body = wrapper.read_text()
         result.assertion(f"{version}: wrapper execs an absolute interpreter", interpreter in body)
+        # THE INTERPRETER IS PINNED; THE UNIT PATH IS NOT. Those are
+        # deliberately different: the interpreter lives outside every home so
+        # an absolute path is a pin, while the unit lives INSIDE this home so
+        # an absolute path would be a freeze -- the shim would go on running
+        # the installing home's copy from any other home
+        # (skill-manager#262). This assertion used to require
+        # `<checkout>/src/skt/cli.py` in the body, which is exactly the
+        # frozen shape, so the graph defended the defect.
         result.assertion(
-            f"{version}: wrapper execs this checkout's cli.py",
-            str(REPO_ROOT / "src" / "skt" / "cli.py") in body,
+            f"{version}: wrapper resolves its unit from the home it lives in",
+            'home="$(cd -- "$shim_dir/../.." && pwd -P)"' in body,
+        )
+        result.assertion(
+            f"{version}: wrapper names the unit path home-RELATIVE, not absolute",
+            "plugins/skt/src/skt/cli.py" in body
+            and str(unit_dir / "src" / "skt" / "cli.py") not in body,
         )
 
         help_run = procs.run(
