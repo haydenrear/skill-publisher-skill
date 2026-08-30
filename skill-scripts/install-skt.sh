@@ -79,40 +79,52 @@ set -euo pipefail
 
 py="$PY"
 rel="$REL"
+pinned_home="$SKILL_MANAGER_HOME"
 SH
 
 cat >> "$WRAPPER" <<'SH'
 
+# BUILTINS ONLY BELOW THIS LINE, and that is a hard requirement rather than a
+# style: this wrapper must answer with NO PATH AT ALL. It is the same reason
+# the interpreter above is absolute -- `install-skt.sh` has always said "a bare
+# `python3` in the wrapper breaks the moment PATH is minimal" -- and the first
+# version of this home-relative resolution reintroduced exactly that bug one
+# level over, by calling `dirname` and `readlink`. With PATH empty `dirname`
+# is not found, $shim_dir comes back empty, and the wrapper resolves the WRONG
+# HOME and then reports that the home holds no copy. sktSurface's
+# "wrapper answers with no python on PATH" node caught it.
+#
+# ${var%/*} and `cd`/`pwd`/`[` are builtins. `dirname` and `readlink` are not.
+
 # The home this wrapper LIVES IN, not the home that installed it. `pwd -P`
 # resolves the DIRECTORY's own symlinks and never the wrapper's, so a child
 # home whose bin/cli/skt is a link into its parent still answers with itself
-# here — which is the case the preference exists for.
+# here -- which is the case the preference exists for.
 shim="${BASH_SOURCE[0]}"
-shim_dir="$(cd -- "$(dirname -- "$shim")" && pwd -P)"
+shim_dir="${shim%/*}"
+[ "$shim_dir" = "$shim" ] && shim_dir="."
+shim_dir="$(cd -- "$shim_dir" && pwd -P)"
 home="$(cd -- "$shim_dir/../.." && pwd -P)"
 
 entrypoint="$home/$rel"
 
-if [ ! -f "$entrypoint" ]; then
+if [ ! -f "$entrypoint" ] && [ -n "$pinned_home" ] && [ -f "$pinned_home/$rel" ]; then
   # THE SANCTIONED FALLBACK, and the only one: this home holds no copy of skt,
-  # so run the one this wrapper is pinned to. The pin is FOLLOWED, not stored
-  # — a stored path would be taken by a home that has its own copy too.
-  link="$shim"
-  for _ in 1 2 3 4 5 6 7 8; do
-    [ -L "$link" ] || break
-    target="$(readlink "$link")"
-    case "$target" in
-      /*) link="$target" ;;
-      *)  link="$(cd -- "$(dirname -- "$link")" && pwd -P)/$target" ;;
-    esac
-    pinned="$(cd -- "$(dirname -- "$link")/../.." 2>/dev/null && pwd -P)" || continue
-    if [ -f "$pinned/$rel" ]; then entrypoint="$pinned/$rel"; break; fi
-  done
+  # so run the one this wrapper was pinned to at install time.
+  #
+  # STORED, NOT FOLLOWED -- and the ordering is what makes that safe. The
+  # earlier version followed the wrapper's own symlink chain to avoid a stored
+  # path being "taken by a home that has its own copy", but that hazard is
+  # about PRECEDENCE, not storage: the home-relative path above is tried
+  # FIRST, so a home with its own copy never reaches this line. Following the
+  # chain needed `readlink`, which is exactly what the PATH requirement above
+  # forbids.
+  entrypoint="$pinned_home/$rel"
 fi
 
 if [ ! -f "$entrypoint" ]; then
   echo "skt: the home at $home holds no copy of skt ($rel)," >&2
-  echo "  and this wrapper is not a link into a home that does." >&2
+  echo "  and the home this wrapper was pinned to does not either." >&2
   echo "  Install skt into this home, or run the home that owns it." >&2
   exit 127
 fi
