@@ -108,6 +108,7 @@ import shlex
 
 from . import context as ctx_mod
 from . import homes
+from . import relay as relay_mod
 
 # 2: the record gained `upstream_stale` and `ahead_of_remote`. Purely
 # additive, and every reader uses `.get(...) or []`, so a v1 record still
@@ -180,6 +181,12 @@ CLI_VERSION_BUDGET_SECONDS = 5
 # switch exists only for an operator who has measured a reason to spend
 # nothing here.
 CLI_VERSION_ENV = "SKT_CLI_VERSION"
+
+# Marks a version probe that was REFUSED rather than answered, so the state
+# machine below can offer the remedy that fits (make the environment and the
+# home agree) instead of the one that does not (re-write the pin — the pin
+# is fine, and re-writing it changes nothing about a cross-home refusal).
+CLI_REFUSED_PREFIX = "the CLI refused a cross-home run: "
 
 # The tap formula `skill-manager upgrade --self` upgrades, and therefore the
 # only thing whose "newer one exists" answer matches that remedy.
@@ -473,6 +480,20 @@ def _installed_cli_version(home: Path, timeout: float) -> tuple[str | None, str]
     if proc is None:
         return None, "the CLI did not answer --version inside its budget"
     if proc.returncode != 0:
+        # A REFUSAL IS NOT EVIDENCE ABOUT A VERSION (skill-manager#264).
+        # A `bin/cli` shim binds the home it lives in and refuses when
+        # `SKILL_MANAGER_HOME` names a different one, so this probe's
+        # non-zero exit can mean "the environment disagrees with the pin"
+        # — which the pin-rewriting remedy below does not touch. Reported
+        # in the shim's own words, both homes included; `detail[0]` alone
+        # kept the headline and dropped exactly the two paths that make
+        # the sentence actionable.
+        refusal = relay_mod._hoist((proc.stdout or "") + (proc.stderr or ""))
+        if refusal or proc.returncode == relay_mod.HOME_MISMATCH_EXIT:
+            return None, CLI_REFUSED_PREFIX + (
+                "; ".join(line.strip() for line in refusal)
+                or f"a bin/cli shim refused a cross-home run (exit {proc.returncode})"
+            )
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return None, f"{cli} --version exited {proc.returncode}" + (
             f": {detail[0]}" if detail else ""
@@ -554,11 +575,13 @@ def _cli_state(home: Path, deadline: float) -> dict:
         state = "no-cli" if "CLI pin" in why else (
             "timeout" if "budget" in why else "error"
         )
-        return {
-            "state": state,
-            "reason": why,
-            "fix": f"skill-manager home shims --root {home}   # re-writes the pin",
-        }
+        fix = f"skill-manager home shims --root {home}   # re-writes the pin"
+        if why.startswith(CLI_REFUSED_PREFIX):
+            fix = (
+                f"SKILL_MANAGER_HOME={home} skt check   # the pin is fine; the "
+                "environment names a different home than the shim serves"
+            )
+        return {"state": state, "reason": why, "fix": fix}
 
     # A LOCAL BUILD IS NOT BEHIND A RELEASE, it is beside it. skill-manager
     # stamps a build suffix -- `0.25.0+g08a1c00d4503` -- on a CLI built from

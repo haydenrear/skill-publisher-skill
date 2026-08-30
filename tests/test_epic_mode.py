@@ -23,10 +23,21 @@ def isolate_root_home(tmp_path, monkeypatch):
     monkeypatch.setenv("SKT_ROOT_HOME", str(tmp_path / "fake-root" / ".skill-manager"))
 
 
-def fake_bootstrap(home: Path, exit_code: int = 0) -> Path:
-    """A home whose git-issue-workflow ships a controllable bootstrap-home.sh."""
+def fake_bootstrap(home: Path, exit_code: int = 0, says: str = "") -> Path:
+    """A home whose git-issue-workflow ships a controllable bootstrap-home.sh.
+
+    `says` seeds the child's exact output, which is the thing HBR-3 is
+    about: what the reader is shown when this fails.
+    """
     script = home / "skills" / "git-issue-workflow" / "scripts" / "bootstrap-home.sh"
     script.parent.mkdir(parents=True, exist_ok=True)
+    if says:
+        script.write_text(
+            "#!/usr/bin/env bash\ncat >&2 <<'SAID'\n" + says + "\nSAID\n"
+            f"exit {exit_code}\n"
+        )
+        script.chmod(script.stat().st_mode | stat.S_IEXEC)
+        return script
     if exit_code == 0:
         script.write_text(
             "#!/usr/bin/env bash\n"
@@ -89,6 +100,66 @@ def test_dirty_tree_refused(tmp_path, capsys):
     (repo / "dirty.txt").write_text("x")
     assert run_epic_new(repo, "8-slug", tmp_path / "wt-8-slug") == 1
     assert "not clean" in capsys.readouterr().out
+
+
+#: What `bootstrap-home.sh`'s `die` actually printed in skill-manager#264,
+#: reproduced against a real refusing shim on 2026-08-29. The diagnosis is
+#: the SECOND line and the last line is a sentence fragment, which is why
+#: `tail[-1]` reported "against the operator's global home." and nothing
+#: else.
+BOOTSTRAP_DIE = """\
+log:       /tmp/bootstrap-home-A3Uj8x.log
+error: no skill-manager CLI with a `home` subcommand was found.
+    on PATH: /Users/x/.skill-manager/bin/cli/skill-manager (too old — `home clone` is missing)
+  Set SKILL_MANAGER_CLI to a build that has it, or install a newer skill-manager.
+  Without it a worktree cannot get its own home, and an agent would run
+  against the operator's global home."""
+
+#: `LauncherShims`' cross-home refusal, as it reaches skt once the probe
+#: stops swallowing it (HBR-2) or when skt runs the shim itself.
+SHIM_REFUSAL = """\
++ probing /Users/x/.skill-manager/bin/cli/skill-manager
+skill-manager: refusing to run against a home you did not name.
+  you named:  /repo/wt-13-slug/.skill-manager
+  this shim would have edited: /Users/x/.skill-manager
+  Say which one you mean:
+    --home /Users/x/.skill-manager   (this shim's home)
+    --home /repo/wt-13-slug/.skill-manager   (the home your environment names)
+error: home clone failed"""
+
+
+def test_bootstrap_failure_relays_the_cause_not_the_last_line(tmp_path, capsys):
+    """HBR-3 / #264 defect 2: the diagnosis reached the reader.
+
+    Baseline was `tail[-1]` — the child's final line — so a five-line
+    failure rendered as its own trailing fragment and the operator had to
+    re-run the bootstrap by hand to learn anything.
+    """
+    repo = make_repo(tmp_path / "repo")
+    _ignore_home(repo)
+    home = make_home(repo, units={})
+    fake_bootstrap(home, exit_code=1, says=BOOTSTRAP_DIE)
+    assert run_epic_new(repo, "12-slug", tmp_path / "wt-12-slug") == 3
+    out = capsys.readouterr().out
+    assert "rolled back" in out, "the rollback report is unchanged"
+    assert "no skill-manager CLI with a `home` subcommand was found" in out
+    # #264 asked for this by name: the script writes a log and says so.
+    assert "log:   /tmp/bootstrap-home-A3Uj8x.log" in out
+
+
+def test_a_seeded_cross_home_refusal_survives_provisioning(tmp_path, capsys):
+    """GOAL-the-real-error-survives, at the site that measured its baseline."""
+    repo = make_repo(tmp_path / "repo")
+    _ignore_home(repo)
+    home = make_home(repo, units={})
+    fake_bootstrap(home, exit_code=1, says=SHIM_REFUSAL)
+    assert run_epic_new(repo, "13-slug", tmp_path / "wt-13-slug") == 3
+    out = capsys.readouterr().out
+    assert "refusing to run against a home you did not name" in out
+    assert "you named:  /repo/wt-13-slug/.skill-manager" in out
+    assert "this shim would have edited: /Users/x/.skill-manager" in out
+    # And the remedy no longer sends the reader after an upgrade.
+    assert "upgrading changes nothing" in out
 
 
 def test_bootstrap_failure_rolls_back(tmp_path, capsys):

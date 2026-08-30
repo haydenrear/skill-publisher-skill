@@ -20,6 +20,7 @@ import tomllib
 from pathlib import Path
 
 from . import homes
+from . import relay as relay_mod
 
 UNIT = "git-issue-workflow"
 UNIT_SOURCE = "github:haydenrear/git-issue-workflow-skill"
@@ -212,11 +213,28 @@ def epic_new(ticket_id: str, base: str | None, path: str) -> int:
     if proc.returncode != 0:
         git("worktree", "remove", "--force", path)
         git("branch", "-D", branch)
-        tail = (proc.stdout + proc.stderr).strip().splitlines()
-        print(f"error: home bootstrap failed (exit {proc.returncode}); worktree and branch rolled back")
-        if tail:
-            print("       " + tail[-1])
-        print(f"fix:   {bootstrap} --root <repo-root>   # once per repository, then re-run")
+        # The rollback above is right and always was; what was wrong is what
+        # got PRINTED after it. This was the child's LAST line and nothing
+        # else — `tail[-1]` — which for a shell `die` is its final
+        # consequence, never its cause: skill-manager#264 rendered a
+        # five-line bootstrap failure as the dangling fragment "against the
+        # operator's global home.", and the diagnosis, plus the log path the
+        # script had already written, were both gone. Relaying keeps them.
+        relay_mod.emit(
+            relay_mod.relay(
+                relay_mod.label_for(bootstrap),
+                proc,
+                reason=(
+                    f"home bootstrap failed (exit {proc.returncode}); "
+                    "worktree and branch rolled back"
+                ),
+                fix=f"{bootstrap} --root <repo-root>   # once per repository, then re-run",
+                refusal_fix=(
+                    f"SKILL_MANAGER_CLI=<the real build> {bootstrap} --root <repo-root>"
+                    "   # another home's shim refused; upgrading changes nothing"
+                ),
+            )
+        )
         return 3
     print(f"created epic worktree {path}")
     print(f"branch     {branch} (pinned base {commit_oid[:12]}; retention ref {ref_name})")

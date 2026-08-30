@@ -20,6 +20,7 @@ from pathlib import Path
 from . import check as check_mod
 from . import context as ctx_mod
 from . import homes
+from . import relay as relay_mod
 
 
 FETCH_TIMEOUT_SECONDS = 20
@@ -146,7 +147,8 @@ def run(unit_name: str | None, *, start: str | Path = ".") -> int:
         print(error)
         return 1
     print(f"skt sync: using {provenance}")
-    from .publish import _cli_env  # livelock guard: strip SKILL_MANAGER_CLI
+    # livelock guard: strip SKILL_MANAGER_CLI
+    from .publish import _cli_env, _refusal_fix
 
     proc = subprocess.run(
         [str(cli), "sync", unit_name, "--git-latest"],
@@ -155,8 +157,15 @@ def run(unit_name: str | None, *, start: str | Path = ".") -> int:
         env=_cli_env(),
     )
     if proc.returncode != 0:
-        print(f"skt sync: underlying sync failed (exit {proc.returncode})")
-        print(proc.stdout[-2000:] + proc.stderr[-2000:])
+        relay_mod.emit(
+            relay_mod.relay(
+                relay_mod.label_for(cli),
+                proc,
+                reason=f"skt sync: the underlying sync failed (exit {proc.returncode})",
+                fix=f"{cli} sync {unit_name} --git-latest   # run it yourself to see why",
+                refusal_fix=_refusal_fix(home, f"skt sync {unit_name}"),
+            )
+        )
         return proc.returncode
     after = {u.name: u for u in homes.read_units(home)}.get(unit_name)
     store = check_mod._store_dir(home, unit)
