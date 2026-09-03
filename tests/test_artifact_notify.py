@@ -572,8 +572,15 @@ def test_use_network_governs_the_remote_phase_only(tmp_path):
     check_mod.collect(repo, use_network=False)
     assert log.exists(), "a local probe is not governed by use_network"
     log.unlink()
+    # The migration probe is local on the same terms and has its own switch:
+    # with only IT enabled the CLI is still spawned, so the switch names a
+    # real spawn rather than decorating a no-op.
+    check_mod.collect(repo, use_network=False, probe_artifacts=False,
+                      probe_cli=False, probe_migration=True)
+    assert log.exists(), "probe_migration=True spawns this home's CLI"
+    log.unlink()
     report = check_mod.collect(repo, use_network=False, probe_artifacts=False,
-                               probe_cli=False)
+                               probe_cli=False, probe_migration=False)
     assert not log.exists()
     assert report["artifacts"]["state"] == "off"
     assert report["cli"]["state"] == "off"

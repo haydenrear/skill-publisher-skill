@@ -609,6 +609,70 @@ def _cli_state(home: Path, deadline: float) -> dict:
     }
 
 
+# The two shapes that both mean "this home runs another home's copy". Read
+# from `home repair`'s own JSON rather than re-derived here: skill-manager owns
+# the question, and a second implementation of it in skt is precisely the
+# two-readers-one-truth defect this notification exists because of.
+_MIGRATION_KINDS = ("PARENT_SHIM_SHADOWS_LOCAL_COPY", "FOREIGN_PATH_IN_SHIM")
+
+
+def _migration_notifications(home: Path, deadline: float | None = None) -> list[dict]:
+    """Does this home hold a copy of a unit that it does not run?
+
+    The symptom is an afternoon: you edit a skill in the home you are working
+    in, nothing changes, and every check says the home is fine — `home verify`
+    passes because every path RESOLVES, it just resolves into the parent.
+
+    Silent on every uncertainty. A missing pin, a timeout, a non-zero exit or
+    output that will not parse all report NOTHING, because "I could not find
+    out" is not "you need to migrate", and a greeting that cries migration on
+    a healthy home is one people learn to scroll past.
+
+    New homes do not need this: `home clone` writes local shims wherever the
+    copy can run them. It is a one-time pass over homes that already exist.
+    """
+    cli = home / "bin" / "cli" / "skill-manager"
+    if not cli.is_file():
+        return []
+    timeout = 25.0
+    if deadline is not None:
+        timeout = min(timeout, max(0.0, deadline - time.monotonic()))
+        if timeout < 1.0:
+            return []
+    try:
+        proc = subprocess.run(
+            [str(cli), "home", "repair", "--home", str(home), "--json"],
+            capture_output=True, text=True, timeout=timeout,
+            env={**os.environ, "SKILL_MANAGER_HOME": str(home)},
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    # `home repair` exits non-zero WHEN IT FINDS SOMETHING, so the exit code
+    # is not the error signal here -- the parse is.
+    try:
+        report = json.loads(proc.stdout)
+        findings = report["findings"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return []
+    subjects = sorted({f.get("subject", "?") for f in findings
+                       if f.get("kind") in _MIGRATION_KINDS})
+    if not subjects:
+        return []
+    named = ", ".join(subjects[:3]) + (f" and {len(subjects) - 3} more"
+                                       if len(subjects) > 3 else "")
+    return [{
+        "kind": "home-migration",
+        "count": len(subjects),
+        "subjects": subjects,
+        "message": (
+            f"this home runs another home's copy for {len(subjects)} entry "
+            f"point(s) ({named}) — it HAS its own copy, so an edit here "
+            f"changes nothing"
+        ),
+        "fix": f"skill-manager home repair --home {home} --fix",
+    }]
+
+
 def _cli_notifications(state: dict) -> list[dict]:
     """One notification, and only when this home is demonstrably behind.
 
@@ -830,7 +894,8 @@ def _artifact_notifications(state: dict, unit_notes: list[dict]) -> list[dict]:
 
 
 def collect(start: str | Path = ".", *, use_network: bool = True,
-            probe_artifacts: bool = True, probe_cli: bool = True) -> dict:
+            probe_artifacts: bool = True, probe_cli: bool = True,
+            probe_migration: bool = True) -> dict:
     """One live pass. `use_network` governs the REMOTE phase only.
 
     The artifact probe is local — it asks this home's own CLI about this
@@ -980,6 +1045,15 @@ def collect(start: str | Path = ".", *, use_network: bool = True,
     cli = (_cli_state(home, deadline) if probe_cli
            else {"state": "off", "reason": "probe_cli=False"})
     notifications += _cli_notifications(cli)
+    # After the CLI notification and before the artifacts, because the CLI's
+    # own version explains this one: a home migrated by an older build will
+    # report the shape again, and the reader should see the upgrade first.
+    # A THIRD local spawn, and therefore a third switch. The rule stated
+    # beside `probe_artifacts` is that a local probe gets its own rather than
+    # widening another flag behind a caller's back; a caller that turned the
+    # known probes off and still got a subprocess would be exactly that.
+    if probe_migration:
+        notifications += _migration_notifications(home, deadline)
     # LAST, and from what the git phases have left of the shared deadline.
     # Ordered after them so an added probe cannot make the established
     # unit notifications later than they already were; the cost is that a
@@ -1156,6 +1230,13 @@ def render_text(report: dict) -> str:
             # leaves the homes unreconciled is the migration half-done.
             lines.append(f"    upgrade with: {note['fix']}")
             lines.append("    then re-check this home: skt check")
+        elif note.get("kind") == "home-migration":
+            # Own line, retypable, and the reassurance with it: the command
+            # rewrites entry points, which sounds alarming, and the reason it
+            # is safe is a property of when it fires rather than of the flag.
+            lines.append(f"    migrate with: {note['fix']}")
+            lines.append("    safe: it only rewrites entries this home can "
+                         "already run, and leaves the rest alone")
         elif note.get("kind") == "unit-error":
             # Same shape, and for the same reason — plus the home's own
             # recorded sentence, which names the remote, the branch and
